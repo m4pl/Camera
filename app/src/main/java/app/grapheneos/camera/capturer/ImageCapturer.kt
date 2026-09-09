@@ -28,7 +28,9 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 private const val imageFileFormat = ".jpg"
 
 class ImageCapturer(val mActivity: MainActivity) {
-    val camConfig = mActivity.camConfig
+    val viewfinder = mActivity.viewfinder
+
+    private val session = mActivity.session
 
     val isTakingPicture: Boolean
         get() = currentImageSaver != null
@@ -59,11 +61,11 @@ class ImageCapturer(val mActivity: MainActivity) {
 
     @SuppressLint("RestrictedApi")
     fun takePicture() {
-        if (camConfig.camera == null) {
+        if (session.camera == null) {
             return
         }
 
-        if (!camConfig.canTakePicture) {
+        if (!viewfinder.canTakePicture) {
             mActivity.showMessage(R.string.unsupported_taking_picture_while_recording)
             return
         }
@@ -73,10 +75,11 @@ class ImageCapturer(val mActivity: MainActivity) {
         }
 
         val imageMetadata = ImageCapture.Metadata()
-        imageMetadata.isReversedHorizontal = camConfig.lensFacing == CameraSelector.LENS_FACING_FRONT
-                && camConfig.saveImageAsPreviewed
+        imageMetadata.isReversedHorizontal =
+            session.lensFacing == CameraSelector.LENS_FACING_FRONT
+                && viewfinder.saveImageAsPreviewed
 
-        if (camConfig.requireLocation) {
+        if (viewfinder.requireLocation) {
             val location = (mActivity.applicationContext as App).getLocation()
             if (location == null) {
                 mActivity.showMessage(R.string.location_unavailable)
@@ -87,16 +90,16 @@ class ImageCapturer(val mActivity: MainActivity) {
 
         val preview = mActivity.imagePreview
 
-        val imageCapture = camConfig.imageCapture!!
+        val imageCapture = session.imageCapture!!
 
         val imageSaver = ImageSaver(
             this,
             mActivity.applicationContext,
             imageCapture.jpegQuality,
-            camConfig.storageLocation,
+            mActivity.capturedItemSession.storageLocation,
             imageFileFormat,
             imageMetadata,
-            camConfig.removeExifAfterCapture,
+            viewfinder.removeExifAfterCapture,
             targetThumbnailWidth = preview.width,
             targetThumbnailHeight = preview.height,
         )
@@ -120,11 +123,11 @@ class ImageCapturer(val mActivity: MainActivity) {
         unfadeCaptureButton()
         currentImageSaver = null
 
-        camConfig.mPlayer.playShutterSound()
-        camConfig.snapPreview()
+        viewfinder.mPlayer.playShutterSound()
+        viewfinder.snapPreview()
 
         mActivity.previewLoader.visibility = View.VISIBLE
-        if (camConfig.selfIlluminate) {
+        if (viewfinder.selfIlluminate) {
 
             val animation: Animation = AlphaAnimation(0.8f, 0f)
             animation.duration = 200
@@ -167,7 +170,7 @@ class ImageCapturer(val mActivity: MainActivity) {
     }
 
     fun onImageSaverSuccess(item: CapturedItem) {
-        camConfig.updateLastCapturedItem(item)
+        mActivity.capturedItemSession.recordCapturedItem(item)
 
         if (mActivity is SecureMainActivity) {
             mActivity.capturedItems.add(item)
@@ -175,7 +178,7 @@ class ImageCapturer(val mActivity: MainActivity) {
     }
 
     fun onStorageLocationNotFound() {
-        camConfig.onStorageLocationNotFound()
+        viewfinder.onStorageLocationNotFound()
     }
 
     fun onImageSaverError(exception: ImageSaverException, skipErrorDialog: Boolean) {

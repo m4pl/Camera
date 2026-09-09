@@ -30,12 +30,9 @@ import android.view.GestureDetector
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.PixelCopy
-import android.view.ScaleGestureDetector
-import android.view.ScaleGestureDetector.OnScaleGestureListener
 import android.view.Surface
 import android.view.SurfaceView
 import android.view.View
-import android.view.View.OnTouchListener
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.view.animation.Animation
@@ -63,29 +60,36 @@ import androidx.camera.view.PreviewView.StreamState
 import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.createBitmap
+import androidx.core.graphics.scale
+import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.view.isVisible
 import androidx.core.view.marginTop
 import androidx.core.view.updateLayoutParams
 import androidx.core.view.updateMargins
+import androidx.lifecycle.lifecycleScope
 import app.grapheneos.camera.App
-import app.grapheneos.camera.CamConfig
 import app.grapheneos.camera.ITEM_TYPE_IMAGE
 import app.grapheneos.camera.ITEM_TYPE_VIDEO
 import app.grapheneos.camera.R
 import app.grapheneos.camera.capturer.ImageCapturer
 import app.grapheneos.camera.capturer.VideoCapturer
 import app.grapheneos.camera.capturer.getVideoThumbnail
+import app.grapheneos.camera.data.camera.session.CameraSession
 import app.grapheneos.camera.data.core.model.CameraMode
-import app.grapheneos.camera.data.media.repository.CapturedItemRepository
 import app.grapheneos.camera.data.settings.repository.SettingsRepository
-import app.grapheneos.camera.shareCapturedItem
 import app.grapheneos.camera.databinding.ActivityMainBinding
 import app.grapheneos.camera.databinding.ScanResultDialogBinding
+import app.grapheneos.camera.domain.camera.model.CameraEntryPoint
+import app.grapheneos.camera.domain.gallery.CapturedItemSession
+import app.grapheneos.camera.domain.qr.BarcodeFormats
 import app.grapheneos.camera.ktx.SystemSettingsObserver
 import app.grapheneos.camera.ktx.applyPreviewRatio
 import app.grapheneos.camera.notifier.SensorOrientationChangeNotifier
+import app.grapheneos.camera.shareCapturedItem
 import app.grapheneos.camera.ui.BottomTabLayout
 import app.grapheneos.camera.ui.CountDownTimerUI
 import app.grapheneos.camera.ui.CustomGrid
@@ -95,6 +99,11 @@ import app.grapheneos.camera.ui.SettingsDialog
 import app.grapheneos.camera.ui.seekbar.ExposureBar
 import app.grapheneos.camera.ui.seekbar.ZoomBar
 import app.grapheneos.camera.ui.showIgnoringShortEdgeMode
+import app.grapheneos.camera.ui.showMoreQrFormatOptions
+import app.grapheneos.camera.ui.viewfinder.ViewfinderGestureHandler
+import app.grapheneos.camera.ui.viewfinder.ViewfinderOrientationHandler
+import app.grapheneos.camera.ui.viewfinder.screen.ViewfinderController
+import app.grapheneos.camera.ui.viewfinder.screen.ViewfinderEffectHandler
 import app.grapheneos.camera.util.CameraControl
 import app.grapheneos.camera.util.ImageResizer
 import app.grapheneos.camera.util.executeIfAlive
@@ -107,48 +116,156 @@ import com.google.android.material.snackbar.Snackbar
 import com.google.android.material.tabs.TabLayout
 import com.google.zxing.BarcodeFormat
 import dagger.hilt.android.AndroidEntryPoint
-import java.io.File
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
-import androidx.core.graphics.scale
-import androidx.core.net.toUri
-import androidx.core.view.isVisible
-import androidx.core.graphics.createBitmap
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 @AndroidEntryPoint
-open class MainActivity : AppCompatActivity(),
-    OnTouchListener,
-    OnScaleGestureListener,
-    GestureDetector.OnGestureListener,
-    GestureDetector.OnDoubleTapListener,
-    SensorOrientationChangeNotifier.Listener {
+open class MainActivity : AppCompatActivity() {
+
+    @Inject
+    lateinit var cameraSessionFactory: CameraSession.Factory
+
+    @Inject
+    lateinit var viewfinderFactory: ViewfinderController.Factory
 
     @Inject
     lateinit var settingsRepository: SettingsRepository
 
     @Inject
-    lateinit var capturedItemRepository: CapturedItemRepository
+    lateinit var cameraEntryPoint: CameraEntryPoint
+
+    @Inject
+    lateinit var barcodeFormats: BarcodeFormats
+
+    @Inject
+    lateinit var capturedItemSession: CapturedItemSession
+
+    lateinit var session: CameraSession
+
+    lateinit var viewfinder: ViewfinderController
 
     private val application: App
         get() = applicationContext as App
 
-    private lateinit var binding: ActivityMainBinding
+    internal lateinit var binding: ActivityMainBinding
+
+    internal val gestureHandler by lazy { ViewfinderGestureHandler(this) }
+    internal val orientationHandler by lazy { ViewfinderOrientationHandler(this) }
+
+    val gestureDetector: GestureDetector
+        get() = gestureHandler.gestureDetector
+
+    lateinit var imageCapturer: ImageCapturer
+
+    lateinit var videoCapturer: VideoCapturer
+
+    lateinit var settingsDialog: SettingsDialog
+
+    val threeButtons: View
+        get() = binding.threeButtons
+
+    val previewView: PreviewView
+        get() = binding.preview
+
+    val bottomOverlay: View
+        get() = binding.bottomOverlay
+
+    val rootView: View
+        get() = binding.root
+
+    val qrScanToggles: View
+        get() = binding.qrScanToggles
+
+    val qrToggle: QRToggle
+        get() = binding.qrScanToggle
+
+    val dmToggle: QRToggle
+        get() = binding.dataMatrixToggle
+
+    val cBToggle: QRToggle
+        get() = binding.pdf417Toggle
+
+    val azToggle: QRToggle
+        get() = binding.aztecToggle
+
+    val flipCameraCircle: View
+        get() = binding.flipCameraCircle
+
+    val cancelButtonView: ImageView
+        get() = binding.cancelButton
+
+    val tabLayout: BottomTabLayout
+        get() = binding.cameraModeTabs
+
+    val captureButton: ImageButton
+        get() = binding.captureButton
+
+    val timerView: TextView
+        get() = binding.timer
+
+    val thirdOption: View
+        get() = binding.thirdOption
+
+    val imagePreview: ShapeableImageView
+        get() = binding.imagePreview
+
+    val previewLoader: ProgressBar
+        get() = binding.previewLoading
+
+    val zoomBar: ZoomBar
+        get() = binding.zoomBar
+
+    val zoomBarPanel: LinearLayout
+        get() = binding.zoomBarPanel
+
+    val exposureBar: ExposureBar
+        get() = binding.exposureBar
+
+    val exposureBarPanel: LinearLayout
+        get() = binding.exposureBarPanel
+
+    val qrOverlay: QROverlay
+        get() = binding.qrOverlay
+
+    val settingsIcon: ImageView
+        get() = binding.settingsOption
+
+    val mainOverlay: ImageView
+        get() = binding.mainOverlay
+
+    val previewGrid: CustomGrid
+        get() = binding.previewGrid
+
+    val cdTimer: CountDownTimerUI
+        get() = binding.cTimer
+
+    val cbText: TextView
+        get() = binding.captureButtonText
+
+    val cbCross: ImageView
+        get() = binding.captureButtonCross
+
+    val gCircleFrame: FrameLayout
+        get() = binding.gCircleFrame
+
+    val muteToggle: ShapeableImageView
+        get() = binding.muteToggle
+
+    val micOffIcon: ImageView
+        get() = binding.micOff
 
     private val cameraPermission = arrayOf(Manifest.permission.CAMERA)
-
-    lateinit var previewView: PreviewView
-    lateinit var previewContainer: ConstraintLayout
-    lateinit var bottomOverlay: View
 
     // Hold a reference to the manual permission dialog to avoid re-creating it if it
     // is already visible and to dismiss it if the permission gets granted.
     private var cameraPermissionDialog: AlertDialog? = null
+
     private var audioPermissionDialog: AlertDialog? = null
 
     @Volatile
@@ -169,102 +286,27 @@ open class MainActivity : AppCompatActivity(),
     // Whether the transition still is standing in for the preview.
     private var transitionShown = false
 
-    private lateinit var mainFrame: View
-    lateinit var rootView: View
-
-    lateinit var qrScanToggles: View
-    private lateinit var moreOptionsToggle: View
-
-    lateinit var qrToggle: QRToggle
-    lateinit var dmToggle: QRToggle
-    lateinit var cBToggle: QRToggle
-    lateinit var azToggle: QRToggle
-
-    lateinit var imageCapturer: ImageCapturer
-    lateinit var videoCapturer: VideoCapturer
-
-    lateinit var flipCameraCircle: View
-    lateinit var cancelButtonView: ImageView
-    lateinit var tabLayout: BottomTabLayout
-    lateinit var thirdCircle: ImageView
-    lateinit var captureButton: ImageButton
-
-    private lateinit var scaleGestureDetector: ScaleGestureDetector
-    lateinit var timerView: TextView
-    lateinit var thirdOption: View
-    lateinit var imagePreview: ShapeableImageView
-    lateinit var previewLoader: ProgressBar
-    private var isZooming = false
-
-    lateinit var zoomBar: ZoomBar
-    lateinit var zoomBarPanel: LinearLayout
-
-    lateinit var exposureBar: ExposureBar
-    lateinit var exposureBarPanel: LinearLayout
-
-    lateinit var qrOverlay: QROverlay
-
-    lateinit var threeButtons: LinearLayout
-
-    lateinit var settingsIcon: ImageView
-
-    private lateinit var exposurePlusIcon: ImageView
-    private lateinit var exposureNegIcon: ImageView
-
-    private lateinit var zoomInIcon: ImageView
-    private lateinit var zoomOutIcon: ImageView
-
-    lateinit var flipCamIcon: ImageView
-
-    lateinit var mainOverlay: ImageView
-
-    lateinit var settingsDialog: SettingsDialog
-    lateinit var previewGrid: CustomGrid
-
-    private var wasSwiping = false
-
-    lateinit var cdTimer: CountDownTimerUI
     var timerDuration = 0
-
-    lateinit var cbText: TextView
-    lateinit var cbCross: ImageView
-
-    lateinit var gCircleFrame: FrameLayout
-
-    private lateinit var gAngleTextView: TextView
-    private lateinit var gCircle: LinearLayout
-
-    private lateinit var gLineX: View
-    private lateinit var gLineZ: View
-
-    private lateinit var gLeftDash: View
-    private lateinit var gRightDash: View
-
-    lateinit var muteToggle: ShapeableImageView
 
     private var bottomNavigationBarPadding: Int = 0
 
-    private var shouldGyroVibrate = true
-    private var hasGyroVibrated = false
-
-    private val gyroVibRunnable = Runnable {
-        vibrateDevice()
-        hasGyroVibrated = true
-    }
+    private var shouldRestartRecording = false
 
     val thumbnailLoaderExecutor = Executors.newSingleThreadExecutor()
 
     private val runnable = Runnable {
         val factory: MeteringPointFactory = SurfaceOrientedMeteringPointFactory(
-            previewView.width.toFloat(), previewView.height.toFloat()
+            previewView.width.toFloat(),
+            previewView.height.toFloat()
         )
 
         val autoFocusPoint = factory.createPoint(
             previewView.width / 2.0f,
-            previewView.height / 2.0f, QROverlay.RATIO
+            previewView.height / 2.0f,
+            QROverlay.RATIO
         )
 
-        camConfig.camera?.cameraControl?.startFocusAndMetering(
+        session.camera?.cameraControl?.startFocusAndMetering(
             FocusMeteringAction.Builder(autoFocusPoint).disableAutoCancel().build()
         )
 
@@ -275,23 +317,10 @@ open class MainActivity : AppCompatActivity(),
 
     private lateinit var snackBar: Snackbar
 
-    private lateinit var focusRing: ImageView
-
     private val focusRingHandler: Handler = Handler(Looper.getMainLooper())
+
     private val focusRingCallback: Runnable = Runnable {
-        focusRing.visibility = View.INVISIBLE
-    }
-
-    lateinit var micOffIcon: ImageView
-
-    private var shouldRestartRecording = false
-
-    fun startFocusTimer() {
-        handler.postDelayed(runnable, autoCenterFocusDuration)
-    }
-
-    fun cancelFocusTimer() {
-        handler.removeCallbacks(runnable)
+        binding.focusRing.visibility = View.INVISIBLE
     }
 
     private val restartRecordingWithAudioPermissionLauncher = registerForActivityResult(
@@ -299,7 +328,7 @@ open class MainActivity : AppCompatActivity(),
     ) { granted ->
         if (granted) {
             shouldRestartRecording = true
-            camConfig.startCamera(true)
+            viewfinder.startCamera(true)
             return@registerForActivityResult
         }
         showAudioPermissionDeniedDialog {
@@ -312,9 +341,7 @@ open class MainActivity : AppCompatActivity(),
         RequestMultiplePermissions()
     ) { permissions: Map<String, Boolean> ->
         if (permissions.containsKey(Manifest.permission.RECORD_AUDIO)) {
-            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-                == PackageManager.PERMISSION_GRANTED
-            ) {
+            if (hasPermission(Manifest.permission.RECORD_AUDIO)) {
                 Log.i(TAG, "Permission granted for recording audio.")
             } else {
                 Log.i(TAG, "Permission denied for recording audio.")
@@ -322,12 +349,7 @@ open class MainActivity : AppCompatActivity(),
             }
         }
         if (permissions.containsKey(Manifest.permission.CAMERA)) {
-            if (ActivityCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.CAMERA
-                ) ==
-                PackageManager.PERMISSION_GRANTED
-            ) {
+            if (hasCameraPermission()) {
                 Log.i(TAG, "Permission granted for camera.")
             } else {
                 Log.i(TAG, "Permission denied for camera.")
@@ -335,22 +357,16 @@ open class MainActivity : AppCompatActivity(),
         }
     }
 
-    // Used to request permission from the user
-    var dirPicker = registerForActivityResult(ActivityResultContracts.StartActivityForResult())
-    { result ->
+    fun onDeviceAngleChange(xDegrees: Float, zDegrees: Float) {
+        orientationHandler.onDeviceAngleChange(xDegrees, zDegrees)
+    }
 
-        val data: Uri? = result.data?.data
+    fun startFocusTimer() {
+        handler.postDelayed(runnable, autoCenterFocusDuration)
+    }
 
-        if (data?.encodedPath != null) {
-            val file = File(data.encodedPath!!)
-            if (file.exists()) {
-                showMessage(getString(R.string.file_already_exists, file.absolutePath))
-            } else {
-                showMessage(getString(R.string.file_does_not_exist, data.encodedPath))
-            }
-        }
-
-        Log.i(TAG, "Selected location: ${data?.encodedPath!!}")
+    fun cancelFocusTimer() {
+        handler.removeCallbacks(runnable)
     }
 
     private fun showAudioPermissionDeniedDialog(onDisableAudio: () -> Unit = {}) {
@@ -363,7 +379,8 @@ open class MainActivity : AppCompatActivity(),
             val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
             val uri = Uri.fromParts(
                 "package",
-                packageName, null
+                packageName,
+                null
             )
             intent.data = uri
             startActivity(intent)
@@ -371,7 +388,7 @@ open class MainActivity : AppCompatActivity(),
         builder.setNegativeButton(R.string.cancel, null)
 
         builder.setNeutralButton(R.string.disable_audio) { _: DialogInterface?, _: Int ->
-            camConfig.includeAudio = false
+            viewfinder.includeAudio = false
             onDisableAudio()
         }
 
@@ -401,7 +418,7 @@ open class MainActivity : AppCompatActivity(),
         transitionShown = false
         mainOverlay.visibility = View.INVISIBLE
 
-        if (camConfig.isQRMode) {
+        if (viewfinder.isQRMode) {
             return
         }
 
@@ -492,7 +509,10 @@ open class MainActivity : AppCompatActivity(),
 
     private fun frameCopyLooper(): Looper {
         frameCopyThread?.let { return it.looper }
-        return HandlerThread("frame-copy").apply { start(); frameCopyThread = this }.looper
+        return HandlerThread("frame-copy").apply {
+            start()
+            frameCopyThread = this
+        }.looper
     }
 
     // Not from the strip's own touch listener: a tab view takes the DOWN, so the strip is only
@@ -509,13 +529,12 @@ open class MainActivity : AppCompatActivity(),
     // A copy taken for a switch that never happened shows a scene the camera has since moved on
     // from, which is worse behind the transition than paying for a fresh one.
     private fun hasFreshPrefetch(): Boolean = framePrefetchedAt != 0L &&
-            SystemClock.uptimeMillis() - framePrefetchedAt < PREFETCH_FRESHNESS_MS
+        SystemClock.uptimeMillis() - framePrefetchedAt < PREFETCH_FRESHNESS_MS
 
-    private fun animateFocusRing(x: Float, y: Float) {
-
+    fun animateFocusRing(x: Float, y: Float) {
         // Move the focus ring so that its center is at the tap location (x, y)
-        val width = focusRing.width.toFloat()
-        focusRing.updateLayoutParams<ConstraintLayout.LayoutParams> {
+        val width = binding.focusRing.width.toFloat()
+        binding.focusRing.updateLayoutParams<ConstraintLayout.LayoutParams> {
             updateMargins(
                 left = (x - width / 2).roundToInt(),
                 top = (y - width / 2).roundToInt()
@@ -523,12 +542,12 @@ open class MainActivity : AppCompatActivity(),
         }
 
         // Show focus ring
-        focusRing.visibility = View.VISIBLE
-        focusRing.alpha = 1f
+        binding.focusRing.visibility = View.VISIBLE
+        binding.focusRing.alpha = 1f
 
         if (areSystemAnimationsEnabled()) {
             // Animate the focus ring to disappear
-            focusRing.animate()
+            binding.focusRing.animate()
                 .setStartDelay(500)
                 .setDuration(300)
                 .alpha(0f)
@@ -539,9 +558,8 @@ open class MainActivity : AppCompatActivity(),
                     override fun onAnimationStart(animation: Animator) {}
 
                     override fun onAnimationEnd(animator: Animator) {
-
                         if (!isCancelled) {
-                            focusRing.visibility = View.INVISIBLE
+                            binding.focusRing.visibility = View.INVISIBLE
                         }
 
                         isCancelled = false
@@ -560,15 +578,16 @@ open class MainActivity : AppCompatActivity(),
     }
 
     private fun areSystemAnimationsEnabled(): Boolean {
-
         val duration: Float = Settings.Global.getFloat(
             contentResolver,
-            Settings.Global.ANIMATOR_DURATION_SCALE, 1f
+            Settings.Global.ANIMATOR_DURATION_SCALE,
+            1f
         )
 
         val transition: Float = Settings.Global.getFloat(
             contentResolver,
-            Settings.Global.TRANSITION_ANIMATION_SCALE, 1f
+            Settings.Global.TRANSITION_ANIMATION_SCALE,
+            1f
         )
 
         return duration != 0f && transition != 0f
@@ -586,24 +605,32 @@ open class MainActivity : AppCompatActivity(),
                     showMessage(R.string.no_image)
                     return
                 }
-                it.putParcelableArrayListExtra(InAppGallery.INTENT_KEY_LIST_OF_SECURE_MODE_CAPTURED_ITEMS, list)
+                it.putParcelableArrayListExtra(
+                    InAppGallery.INTENT_KEY_LIST_OF_SECURE_MODE_CAPTURED_ITEMS,
+                    list
+                )
             } else {
                 it.putExtra(InAppGallery.INTENT_KEY_VIDEO_ONLY_MODE, requiresVideoModeOnly)
             }
 
             if (isThumbnailLoaded) { // indicates that last captured item is accessible
-                it.putExtra(InAppGallery.INTENT_KEY_LAST_CAPTURED_ITEM, camConfig.lastCapturedItem)
+                it.putExtra(
+                    InAppGallery.INTENT_KEY_LAST_CAPTURED_ITEM,
+                    capturedItemSession.lastCapturedItem,
+                )
             }
 
             startActivity(it)
         }
+    }
 
+    private fun hasPermission(permission: String): Boolean {
+        return ContextCompat.checkSelfPermission(this, permission) ==
+            PackageManager.PERMISSION_GRANTED
     }
 
     private fun hasCameraPermission(): Boolean {
-        return ContextCompat.checkSelfPermission(
-            this, Manifest.permission.CAMERA
-        ) == PackageManager.PERMISSION_GRANTED
+        return hasPermission(Manifest.permission.CAMERA)
     }
 
     private fun checkPermissions() {
@@ -612,16 +639,18 @@ open class MainActivity : AppCompatActivity(),
         // Check if the app has access to the user's camera
         when {
             hasCameraPermission() -> {
-
                 // If the user has manually granted the permission, dismiss the dialog.
-                if (cameraPermissionDialog != null && cameraPermissionDialog!!.isShowing) cameraPermissionDialog!!.cancel()
+                if (cameraPermissionDialog != null &&
+                    cameraPermissionDialog!!.isShowing
+                ) {
+                    cameraPermissionDialog!!.cancel()
+                }
                 Log.i(TAG, "Permission granted.")
 
                 // Setup the camera since the permission is available
-                camConfig.initializeCamera()
+                viewfinder.initializeCamera()
             }
             shouldShowRequestPermissionRationale(Manifest.permission.CAMERA) -> {
-
                 Log.i(TAG, "The user has default denied camera permission.")
 
                 // Don't build and show a new dialog if it's already visible
@@ -637,14 +666,14 @@ open class MainActivity : AppCompatActivity(),
                     val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
                     val uri = Uri.fromParts(
                         "package",
-                        packageName, null
+                        packageName,
+                        null
                     )
                     intent.data = uri
                     startActivity(intent)
                 }
                 builder.setNegativeButton(R.string.cancel, null)
                 builder.setOnDismissListener {
-
                     // The dialog could have either been dismissed by clicking on the
                     // background or by clicking the cancel button. So in those cases,
                     // the app should exit as the app depends on the camera permission.
@@ -665,28 +694,23 @@ open class MainActivity : AppCompatActivity(),
         }
 
         audioPermissionDialog?.let { dialog ->
-            if (ContextCompat.checkSelfPermission(
-                    this, Manifest.permission.RECORD_AUDIO
-                ) ==
-                PackageManager.PERMISSION_GRANTED
-            ) {
-                if (dialog.isShowing) {
-                    dialog.dismiss()
-                }
+            if (hasPermission(Manifest.permission.RECORD_AUDIO) && dialog.isShowing) {
+                dialog.dismiss()
             }
         }
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
         // there are no camera controls in qr mode
-        if (camConfig.isQRMode) {
+        if (viewfinder.isQRMode) {
             return super.onKeyUp(keyCode, event)
         }
 
         when (keyCode) {
             KeyEvent.KEYCODE_VOLUME_DOWN,
             KeyEvent.KEYCODE_VOLUME_UP,
-            KeyEvent.KEYCODE_CAMERA -> {
+            KeyEvent.KEYCODE_CAMERA,
+            -> {
                 captureButton.performClick()
             }
             KeyEvent.KEYCODE_FOCUS -> {
@@ -714,23 +738,19 @@ open class MainActivity : AppCompatActivity(),
 
     override fun onResume() {
         super.onResume()
-        resumeOrientationSensor()
+        orientationHandler.resumeOrientationSensor()
         // Check camera permission again if the user switches back to the app (maybe
         // after enabling/disabling the camera permission in Settings)
         // Will also be called by Android Lifecycle when the app starts up
         checkPermissions()
 
-        if (camConfig.isQRMode) {
+        if (viewfinder.isQRMode) {
             startFocusTimer()
-        }
-
-        if (this !is SecureActivity) {
-            camConfig.fetchLastCapturedItem()
         }
 
         updateThumbnail()
 
-        if (camConfig.requireLocation) {
+        if (viewfinder.requireLocation) {
             requestLocation()
         }
 
@@ -738,7 +758,7 @@ open class MainActivity : AppCompatActivity(),
         if (!(this is VideoCaptureActivity && thirdOption.isVisible)) {
             if (!isQRDialogShowing) {
                 if (hasCameraPermission()) {
-                    camConfig.initializeCamera(true)
+                    viewfinder.initializeCamera(true)
                 } else {
                     Log.i(TAG, "Leaving the camera uninitialized until the permission is granted.")
                 }
@@ -748,8 +768,21 @@ open class MainActivity : AppCompatActivity(),
 
     val requiresVideoModeOnly: Boolean
         get() {
-            return this is VideoOnlyActivity || this is VideoCaptureActivity
+            return cameraEntryPoint.requiresVideoModeOnly
         }
+
+    private fun selectBarcodeFormatToggles() {
+        val toggles = mapOf(
+            BarcodeFormat.QR_CODE to qrToggle,
+            BarcodeFormat.AZTEC to azToggle,
+            BarcodeFormat.PDF_417 to cBToggle,
+            BarcodeFormat.DATA_MATRIX to dmToggle,
+        )
+
+        barcodeFormats.enabled.forEach { format ->
+            toggles[format]?.isSelected = true
+        }
+    }
 
     override fun onPause() {
         super.onPause()
@@ -757,24 +790,22 @@ open class MainActivity : AppCompatActivity(),
         // Leaving a mode switch waiting on an animation that will never finish would strand the
         // strip on a mode the camera never entered.
         tabLayout.settleNow()
-        pauseOrientationSensor()
+        orientationHandler.pauseOrientationSensor()
 
         // The countdown would otherwise keep ticking while the app is in the background and fire a
         // capture into a camera that has already been unbound.
         cdTimer.cancelTimer()
-        if (camConfig.isQRMode) {
+        if (viewfinder.isQRMode) {
             cancelFocusTimer()
         } else {
             imageCapturer.cancelPendingCaptureRequest()
         }
-        if (camConfig.requireLocation) {
+        if (viewfinder.requireLocation) {
             application.dropLocationUpdates()
         }
         lastFrame = null
         framePrefetchedAt = 0
     }
-
-    lateinit var gestureDetector: GestureDetector
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -782,27 +813,25 @@ open class MainActivity : AppCompatActivity(),
         binding = ActivityMainBinding.inflate(layoutInflater)
         snackBar = Snackbar.make(binding.root, "", Snackbar.LENGTH_LONG)
 
-        gestureDetector = GestureDetector(this, this)
-
-        camConfig = CamConfig(
-            mActivity = this,
-            settingsRepository = settingsRepository,
-            capturedItemRepository = capturedItemRepository,
+        val sessionHandler = ViewfinderEffectHandler(this)
+        session = cameraSessionFactory.create(environment = sessionHandler)
+        viewfinder = viewfinderFactory.create(
+            environment = sessionHandler,
+            effects = sessionHandler,
+            chrome = sessionHandler,
+            session = session,
         )
-        cameraControl = CameraControl(camConfig)
-        mainOverlay = binding.mainOverlay
+        cameraControl = CameraControl(session)
         imageCapturer = ImageCapturer(this)
         videoCapturer = VideoCapturer(this)
-        thirdOption = binding.thirdOption
-        previewLoader = binding.previewLoading
-        imagePreview = binding.imagePreview
-        previewView = binding.preview
-        previewView.scaleType = PreviewView.ScaleType.FIT_START
-        previewContainer = binding.previewContainer
-        bottomOverlay = binding.bottomOverlay
-        scaleGestureDetector = ScaleGestureDetector(this, this)
 
-        tabLayout = binding.cameraModeTabs
+        lifecycleScope.launch(Dispatchers.Main.immediate) {
+            capturedItemSession.prepare()
+
+            updateThumbnail()
+        }
+
+        previewView.scaleType = PreviewView.ScaleType.FIT_START
 
         tabLayout.setOnTouchListener { _, motionEvent ->
             if (motionEvent.action == MotionEvent.ACTION_UP) {
@@ -814,20 +843,16 @@ open class MainActivity : AppCompatActivity(),
             return@setOnTouchListener false
         }
 
-        timerView = binding.timer
         previewView.previewStreamState.observe(this) { state: StreamState ->
             if (state == StreamState.STREAMING) {
                 hidePreviewTransition()
-                camConfig.reloadSettings()
+                viewfinder.reloadSettings()
 
                 restartRecordingIfPermissionsWasUnavailable()
             } else {
                 showPreviewTransition()
             }
         }
-        flipCameraCircle = binding.flipCameraCircle
-
-        flipCamIcon = binding.flipCameraIconContent
 
         var tapDownTimestamp: Long = 0
         flipCameraCircle.setOnTouchListener { _, event ->
@@ -857,8 +882,8 @@ open class MainActivity : AppCompatActivity(),
         }
         flipCameraCircle.setOnClickListener {
             resetAutoSleep()
-            if (camConfig.isQRMode) {
-                camConfig.scanAllCodes = !camConfig.scanAllCodes
+            if (viewfinder.isQRMode) {
+                viewfinder.scanAllCodes = !viewfinder.scanAllCodes
                 return@setOnClickListener
             }
 
@@ -886,10 +911,10 @@ open class MainActivity : AppCompatActivity(),
             rotate.interpolator = LinearInterpolator()
 
             it.startAnimation(rotate)
-            camConfig.toggleCameraSelector()
+            viewfinder.toggleCameraSelector()
         }
-        thirdCircle = binding.thirdCircle
-        thirdCircle.setOnClickListener {
+
+        binding.thirdCircle.setOnClickListener {
             resetAutoSleep()
             if (videoCapturer.isRecording) {
                 imageCapturer.takePicture()
@@ -899,18 +924,16 @@ open class MainActivity : AppCompatActivity(),
             }
         }
 
-        thirdCircle.setOnLongClickListener {
+        binding.thirdCircle.setOnLongClickListener {
             if (videoCapturer.isRecording) {
                 imageCapturer.takePicture()
             } else {
                 shareLatestMedia()
-
             }
 
             return@setOnLongClickListener true
         }
 
-        captureButton = binding.captureButton
         captureButton.setOnClickListener {
             resetAutoSleep()
 
@@ -918,15 +941,15 @@ open class MainActivity : AppCompatActivity(),
             // would otherwise capture in the mode being left behind.
             tabLayout.settleNow()
 
-            if (camConfig.isVideoMode) {
+            if (viewfinder.isVideoMode) {
                 if (videoCapturer.isRecording) {
                     videoCapturer.stopRecording()
                 } else {
                     videoCapturer.startRecording()
                 }
-            } else if (camConfig.isQRMode) {
-                camConfig.toggleTorchState()
-                if (camConfig.isTorchOn) {
+            } else if (viewfinder.isQRMode) {
+                session.toggleTorchState()
+                if (session.isTorchOn) {
                     setCaptureButtonIcon(R.drawable.torch_on_button, R.string.turn_torch_off)
                 } else {
                     setCaptureButtonIcon(R.drawable.torch_off_button, R.string.turn_torch_on)
@@ -944,75 +967,54 @@ open class MainActivity : AppCompatActivity(),
             }
         }
 
-        cancelButtonView = binding.cancelButton
-
-        zoomBar = binding.zoomBar
         zoomBar.setMainActivity(this)
-
-        zoomBarPanel = binding.zoomBarPanel
-
-        exposureBar = binding.exposureBar
         exposureBar.setMainActivity(this)
 
-        exposureBarPanel = binding.exposureBarPanel
-
-        qrOverlay = binding.qrOverlay
-
-        threeButtons = binding.threeButtons
-        settingsIcon = binding.settingsOption
         settingsIcon.setOnClickListener {
-            if (!camConfig.isQRMode)
+            if (!viewfinder.isQRMode) {
                 settingsDialog.show()
+            }
         }
 
-        settingsIcon.viewTreeObserver.addOnGlobalLayoutListener(
-            object : ViewTreeObserver.OnGlobalLayoutListener {
-                override fun onGlobalLayout() {
-                    rootView.viewTreeObserver.removeOnGlobalLayoutListener(this)
-                    val displayCutout = window.decorView.rootWindowInsets.displayCutout
-                    val layoutParams = (settingsIcon.layoutParams as RelativeLayout.LayoutParams)
+        settingsIcon.viewTreeObserver.addOnGlobalLayoutListener(object : ViewTreeObserver.OnGlobalLayoutListener {
+            override fun onGlobalLayout() {
+                rootView.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                val displayCutout = window.decorView.rootWindowInsets.displayCutout
+                val layoutParams = (settingsIcon.layoutParams as RelativeLayout.LayoutParams)
 
-                    val rect = if (displayCutout?.boundingRects?.isNotEmpty() == true)
-                        displayCutout.boundingRects.first() else null
-
-                    val windowsSize = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        windowManager.currentWindowMetrics.bounds
-                    } else {
-                        val size = Point()
-                        // defaultDisplay isn't deprecated below API 30 as highlighted by the IDE
-                        // and this code would only execute if it is (Hint: enclosing if-block)
-                        @Suppress("DEPRECATION")
-                        windowManager.defaultDisplay.getRealSize(size)
-                        Rect(0, 0, size.x, size.y)
-                    }
-
-                    if (rect == null || rect.left <= 0 || rect.right == windowsSize.right) {
-                        layoutParams.addRule(RelativeLayout.CENTER_HORIZONTAL)
-                    } else {
-                        layoutParams.addRule(RelativeLayout.ALIGN_PARENT_LEFT)
-                    }
+                val rect = if (displayCutout?.boundingRects?.isNotEmpty() == true) {
+                    displayCutout.boundingRects.first()
+                } else {
+                    null
                 }
-            })
 
-        exposurePlusIcon = binding.exposurePlusIcon
-        exposureNegIcon = binding.exposureNegIcon
+                val windowsSize = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    windowManager.currentWindowMetrics.bounds
+                } else {
+                    val size = Point()
+                    // defaultDisplay isn't deprecated below API 30 as highlighted by the IDE
+                    // and this code would only execute if it is (Hint: enclosing if-block)
+                    @Suppress("DEPRECATION")
+                    windowManager.defaultDisplay.getRealSize(size)
+                    Rect(0, 0, size.x, size.y)
+                }
 
-        zoomInIcon = binding.zoomInIcon
-        zoomOutIcon = binding.zoomOutIcon
+                if (rect == null || rect.left <= 0 || rect.right == windowsSize.right) {
+                    layoutParams.addRule(RelativeLayout.CENTER_HORIZONTAL)
+                } else {
+                    layoutParams.addRule(RelativeLayout.ALIGN_PARENT_LEFT)
+                }
+            }
+        })
 
-        previewGrid = binding.previewGrid
         previewGrid.setMainActivity(this)
-
-        rootView = binding.root
-
-        mainFrame = binding.mainFrame
-
-        qrScanToggles = binding.qrScanToggles
 
         var isInsetSet = false
 
         ViewCompat.setOnApplyWindowInsetsListener(rootView) { view, windowInsets ->
-            val insets = windowInsets.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.systemBars())
+            val insets = windowInsets.getInsetsIgnoringVisibility(
+                WindowInsetsCompat.Type.systemBars()
+            )
 
             view.layoutParams = (view.layoutParams as ViewGroup.MarginLayoutParams).let {
                 it.setMargins(
@@ -1030,8 +1032,8 @@ open class MainActivity : AppCompatActivity(),
             bottomNavigationBarPadding = insets.bottom
 
             if (insets.top != 0 && !isInsetSet) {
-                mainFrame.layoutParams =
-                    (mainFrame.layoutParams as ViewGroup.MarginLayoutParams).let {
+                binding.mainFrame.layoutParams =
+                    (binding.mainFrame.layoutParams as ViewGroup.MarginLayoutParams).let {
                         it.setMargins(
                             it.leftMargin,
                             (8 * resources.displayMetrics.density.toInt()) + insets.top,
@@ -1047,7 +1049,7 @@ open class MainActivity : AppCompatActivity(),
                         it.setMargins(
                             it.leftMargin,
                             (16 * resources.displayMetrics.density.toInt()) +
-                                    insets.top,
+                                insets.top,
                             it.rightMargin,
                             it.bottomMargin,
                         )
@@ -1071,22 +1073,14 @@ open class MainActivity : AppCompatActivity(),
 
         enableEdgeToEdge()
 
-        cdTimer = binding.cTimer
         cdTimer.setMainActivity(this)
-
-        cbText = binding.captureButtonText
-        cbCross = binding.captureButtonCross
 
         val themedContext = DynamicColors.wrapContextIfAvailable(this, R.style.Theme_SettingsDialog)
         settingsDialog = SettingsDialog(this, themedContext)
 
-        SystemSettingsObserver(lifecycle,Settings.System.ACCELEROMETER_ROTATION,this) {
+        SystemSettingsObserver(lifecycle, Settings.System.ACCELEROMETER_ROTATION, this) {
             forceUpdateOrientationSensor()
         }
-
-        focusRing = binding.focusRing
-
-        micOffIcon = binding.micOff
 
         previewView.viewTreeObserver.addOnPreDrawListener(
             object : ViewTreeObserver.OnPreDrawListener {
@@ -1098,41 +1092,34 @@ open class MainActivity : AppCompatActivity(),
             }
         )
 
-        moreOptionsToggle = binding.moreOptions
-        moreOptionsToggle.setOnClickListener {
-            camConfig.showMoreOptionsForQR()
+        binding.moreOptions.setOnClickListener {
+            showMoreQrFormatOptions(
+                activity = this,
+                barcodeFormats = barcodeFormats,
+                onApplied = { session.refreshQrHints() },
+            )
         }
 
-        qrToggle = binding.qrScanToggle
         qrToggle.mActivity = this
         qrToggle.key = BarcodeFormat.QR_CODE.name
 
-        dmToggle = binding.dataMatrixToggle
         dmToggle.mActivity = this
         dmToggle.key = BarcodeFormat.DATA_MATRIX.name
 
-        cBToggle = binding.pdf417Toggle
         cBToggle.mActivity = this
         cBToggle.key = BarcodeFormat.PDF_417.name
 
-        azToggle = binding.aztecToggle
         azToggle.mActivity = this
         azToggle.key = BarcodeFormat.AZTEC.name
 
-        camConfig.loadSettings()
+        viewfinder.loadSettings()
 
-        gCircle = binding.gCircle
-        gAngleTextView = binding.gCircleText
+        barcodeFormats.load()
+        selectBarcodeFormatToggles()
+        session.refreshQrHints()
 
-        gLineX = binding.gCircleLineX
-        gLineZ = binding.gCircleLineZ
+        settingsDialog.loadInitialState()
 
-        gLeftDash = binding.gCircleLeftDash
-        gRightDash = binding.gCircleRightDash
-
-        gCircleFrame = binding.gCircleFrame
-
-        muteToggle = binding.muteToggle
         muteToggle.setOnClickListener {
             if (videoCapturer.isMuted) {
                 videoCapturer.unmuteRecording()
@@ -1147,60 +1134,55 @@ open class MainActivity : AppCompatActivity(),
     }
 
     private fun repositionTabLayout() {
-
         threeButtons.visibility = View.VISIBLE
 
-        tabLayout.viewTreeObserver.addOnPreDrawListener(
-            object : ViewTreeObserver.OnPreDrawListener {
-                override fun onPreDraw(): Boolean {
+        tabLayout.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                tabLayout.viewTreeObserver
+                    .removeOnPreDrawListener(
+                        this
+                    )
 
-                    tabLayout.viewTreeObserver
-                        .removeOnPreDrawListener(
-                            this
+                val previewHeight169 = binding.previewContainer.width * 16 / 9
+
+                val extraHeight169 = binding.previewContainer.height -
+                    previewHeight169 -
+                    tabLayout.height -
+                    10 * resources.displayMetrics.density.toInt()
+
+                // When there's no extra space in 16:9 for even the bottom nav bar to be present without
+                // obscuring the preview or if there's sufficient space for the entire bottom UI to exist
+                val shouldSnapAboveBottomNav = extraHeight169 < bottomNavigationBarPadding ||
+                    extraHeight169 >=
+                    (threeButtons.height + tabLayout.height + tabLayout.marginTop)
+
+                tabLayout.layoutParams =
+                    (tabLayout.layoutParams as ViewGroup.MarginLayoutParams).let {
+                        it.setMargins(
+                            it.leftMargin,
+                            it.topMargin,
+                            it.rightMargin,
+                            if (shouldSnapAboveBottomNav) {
+                                bottomNavigationBarPadding
+                            } else {
+                                extraHeight169
+                            }
                         )
 
-                    val previewHeight169 = previewContainer.width * 16 / 9
+                        it
+                    }
 
-                    val extraHeight169 = previewContainer.height -
-                            previewHeight169 -
-                            tabLayout.height -
-                            10 * resources.displayMetrics.density.toInt()
-
-                    // When there's no extra space in 16:9 for even the bottom nav bar to be present without
-                    // obscuring the preview or if there's sufficient space for the entire bottom UI to exist
-                    val shouldSnapAboveBottomNav = extraHeight169 < bottomNavigationBarPadding
-                            || extraHeight169 >= (threeButtons.height + tabLayout.height + tabLayout.marginTop)
-
-                    tabLayout.layoutParams =
-                        (tabLayout.layoutParams as ViewGroup.MarginLayoutParams).let {
-
-                            it.setMargins(
-                                it.leftMargin,
-                                it.topMargin,
-                                it.rightMargin,
-                                if (shouldSnapAboveBottomNav) {
-                                    bottomNavigationBarPadding
-                                } else {
-                                    extraHeight169
-                                }
-                            )
-
-                            it
-                        }
-
-                    return true
-                }
-
-            })
+                return true
+            }
+        })
     }
 
     fun finalizeMode(tab: TabLayout.Tab? = null) {
-
         // The strip is untouchable during a recording but not while its start sound still plays, and
         // rebinding the camera there starts the queued recording on a dead recorder. The touch may
         // already have dragged the strip, so put it back on the mode the camera is really in.
         if (videoCapturer.isRecording) {
-            tabLayout.getTabForMode(camConfig.currentMode)?.let {
+            tabLayout.getTabForMode(viewfinder.currentMode)?.let {
                 tabLayout.goToTab(it)
             }
             return
@@ -1214,15 +1196,15 @@ open class MainActivity : AppCompatActivity(),
             // holds the main thread for half a second, so a transition left to the stream state
             // would only reach the screen after the wait it is there to explain. Guarded on the
             // mode really changing, since nothing would rebind to take it back down again.
-            if (mode != camConfig.currentMode) {
+            if (mode != viewfinder.currentMode) {
                 showPreviewTransition()
             }
 
             // switchMode() puts the strip on the mode the camera actually ended up in, which is a
             // different one when an extension fails to bind.
             tabLayout.goToTab(selectedTab) {
-                if (mode != camConfig.currentMode) {
-                    camConfig.switchMode(mode)
+                if (mode != viewfinder.currentMode) {
+                    viewfinder.switchMode(mode)
                 } else if (
                     transitionShown &&
                     previewView.previewStreamState.value == StreamState.STREAMING
@@ -1241,7 +1223,7 @@ open class MainActivity : AppCompatActivity(),
     fun updateSelfTimerBadge() {
         cbText.text = if (timerDuration == 0) "" else "${timerDuration}s"
         // isVideoMode covers the video-only activities too, whatever mode they are nominally in.
-        val applies = timerDuration != 0 && !camConfig.isQRMode && !camConfig.isVideoMode
+        val applies = timerDuration != 0 && !viewfinder.isQRMode && !viewfinder.isVideoMode
         cbText.visibility = if (applies) View.VISIBLE else View.INVISIBLE
     }
 
@@ -1255,7 +1237,7 @@ open class MainActivity : AppCompatActivity(),
             return
         }
 
-        val item = camConfig.lastCapturedItem
+        val item = capturedItemSession.lastCapturedItem
         if (item == null) {
             showMessage(R.string.please_wait_for_image_to_get_captured_before_sharing)
             return
@@ -1301,7 +1283,6 @@ open class MainActivity : AppCompatActivity(),
     private var isQRDialogShowing = false
 
     fun onScanResultSuccess(rawText: String) {
-
         if (isQRDialogShowing) return
 
         isQRDialogShowing = true
@@ -1351,13 +1332,17 @@ open class MainActivity : AppCompatActivity(),
                 override fun onTabUnselected(tab: TabLayout.Tab?) {}
             })
 
-            tabLayout.addTab(tabLayout.newTab().apply {
-                text = "UTF-8"
-            })
+            tabLayout.addTab(
+                tabLayout.newTab().apply {
+                    text = "UTF-8"
+                }
+            )
 
-            tabLayout.addTab(tabLayout.newTab().apply {
-                text = "Binary"
-            })
+            tabLayout.addTab(
+                tabLayout.newTab().apply {
+                    text = "Binary"
+                }
+            )
 
             val ctc: ImageButton = dialogBinding.copyQrText
             ctc.setOnClickListener {
@@ -1388,290 +1373,24 @@ open class MainActivity : AppCompatActivity(),
 
             builder.setOnDismissListener {
                 isQRDialogShowing = false
-                camConfig.startCamera(true)
+                viewfinder.startCamera(true)
             }
 
-            camConfig.cameraProvider?.unbindAll()
+            session.cameraProvider?.unbindAll()
 
             builder.showIgnoringShortEdgeMode()
         }
     }
 
-    override fun onTouch(v: View, event: MotionEvent): Boolean {
-        scaleGestureDetector.onTouchEvent(event)
-        gestureDetector.onTouchEvent(event)
-
-        if (event.action == MotionEvent.ACTION_DOWN) return true else if (event.action == MotionEvent.ACTION_UP) {
-
-            if (wasSwiping) {
-                wasSwiping = false
-                return wasSwiping
-            }
-
-            if (isZooming) {
-                isZooming = false
-                return true
-            }
-
-            if (camConfig.isQRMode)
-                return false
-
-            val x = event.x
-            val y = event.y
-
-            val autoFocusPoint = previewView.meteringPointFactory.createPoint(x, y)
-            animateFocusRing(x, y)
-
-            val focusBuilder = FocusMeteringAction.Builder(autoFocusPoint)
-
-            if (!camConfig.isVideoMode) {
-                camConfig.mPlayer.playFocusStartSound()
-            }
-
-            if (camConfig.focusTimeout == 0L) {
-                focusBuilder.disableAutoCancel()
-            } else {
-                focusBuilder.setAutoCancelDuration(camConfig.focusTimeout, TimeUnit.SECONDS)
-            }
-
-            camConfig.camera!!.cameraControl.startFocusAndMetering(focusBuilder.build())
-
-            exposureBar.showPanel()
-            zoomBar.showPanel()
-            return v.performClick()
-        }
-        return true
+    fun showMessage(@StringRes message: Int) {
+        showMessage(getString(message))
     }
 
-    override fun onScale(detector: ScaleGestureDetector): Boolean {
-        isZooming = true
-        val zoomState = camConfig.zoomState
-        var scale = 1f
-        if (zoomState != null) {
-            scale = zoomState.zoomRatio * detector.scaleFactor
-        }
-        camConfig.camera!!.cameraControl.setZoomRatio(scale)
-        return true
-    }
-
-    override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
-        return true
-    }
-
-    override fun onScaleEnd(detector: ScaleGestureDetector) {}
-
-    private fun rotateView(view: View?, angle: Float) {
-        if (view != null) {
-            view.animate().cancel()
-
-            // Ensuring that the rotation seems continuous
-            if (view.rotation == 0f && angle == 270f)
-                view.rotation = 360f
-
-            if (view.rotation == 270f && angle == 0f)
-                view.rotation = -90f
-
-            view.animate()
-                .rotation(angle)
-                .setDuration(400)
-                .setInterpolator(LinearInterpolator())
-                .start()
-        }
-    }
-
-    @SuppressLint("RestrictedApi")
-    override fun onOrientationChange(orientation: Int) {
-
-        val tr = when (orientation) {
-            in 45..134 -> Surface.ROTATION_270
-            in 135..224 -> Surface.ROTATION_180
-            in 225..314 -> Surface.ROTATION_90
-            else -> Surface.ROTATION_0
-        }
-
-        camConfig.imageCapture?.targetRotation = tr
-        camConfig.videoCapture?.targetRotation = tr
-        camConfig.iAnalyzer?.targetRotation = tr
-
-        if (videoCapturer.isRecording) return
-
-        var iconRotation = (360f - ((orientation - getRotation() + 360) % 360)) % 360
-
-        // Rotate views that should rotate irrespective of the auto-rotate setting
-        rotateView(gCircleFrame, iconRotation)
-
-        // Set iconRotation to 0
-        if (Settings.System.getInt(
-                contentResolver,
-                Settings.System.ACCELEROMETER_ROTATION, 0
-            ) != 1
-        ) {
-            iconRotation = 0f
-        }
-
-        // Rotate views that shouldn't be affected by the auto rotate setting
-        // (Rotates back to 0 when the auto rotate gets toggled to off when the app
-        // is running)
-        rotateView(flipCameraCircle, iconRotation)
-        rotateView(cancelButtonView, iconRotation)
-        rotateView(thirdOption, iconRotation)
-
-        rotateView(exposurePlusIcon, iconRotation)
-        rotateView(exposureNegIcon, iconRotation)
-        rotateView(zoomInIcon, iconRotation)
-        rotateView(zoomOutIcon, iconRotation)
-        rotateView(settingsDialog.settingsFrame, iconRotation)
-
-        rotateView(micOffIcon, iconRotation)
-        rotateView(muteToggle, iconRotation)
-    }
-
-    lateinit var camConfig: CamConfig
-    private lateinit var cameraControl: CameraControl
-
-    companion object {
-        private const val TAG = "GOCam"
-        private const val autoCenterFocusDuration = 2000L
-        private val hexArray = "0123456789ABCDEF".toCharArray()
-
-        private const val SWIPE_THRESHOLD = 100
-        private const val SWIPE_VELOCITY_THRESHOLD = 100
-
-        private const val GYRO_VIBE_WAIT_TIME = 250L
-
-        private const val PREFETCH_FRESHNESS_MS = 2_000L
-
-        // One preview frame at 30fps, the wait for the camera to fill the surface again.
-        private const val FRAME_COPY_RETRY_DELAY_MS = 33L
-        private const val FRAME_COPY_RETRIES = 3
-    }
-
-    override fun onDown(e: MotionEvent): Boolean {
-        return false
-    }
-
-    override fun onShowPress(e: MotionEvent) {}
-
-    override fun onSingleTapUp(e: MotionEvent): Boolean {
-        return false
-    }
-
-    override fun onScroll(
-        e1: MotionEvent?,
-        e2: MotionEvent,
-        distanceX: Float,
-        distanceY: Float
-    ): Boolean {
-        return false
-    }
-
-    override fun onLongPress(e: MotionEvent) {}
-
-    override fun onFling(
-        e1: MotionEvent?,
-        e2: MotionEvent,
-        velocityX: Float,
-        velocityY: Float
-    ): Boolean {
-
-        var result = false
-        try {
-            e1 ?: return false
-
-            val diffY = e2.y - e1.y
-            val diffX = e2.x - e1.x
-
-            if (abs(diffX) > abs(diffY)) {
-                if (abs(diffX) > SWIPE_THRESHOLD && abs(velocityX) > SWIPE_VELOCITY_THRESHOLD) {
-                    if (diffX > 0) {
-                        onSwipeRight()
-                    } else {
-                        onSwipeLeft()
-                    }
-                    result = true
-                }
-            } else if (abs(diffY) > SWIPE_THRESHOLD && abs(velocityY) > SWIPE_VELOCITY_THRESHOLD) {
-                if (diffY > 0) {
-                    onSwipeBottom()
-                } else {
-                    onSwipeTop()
-                }
-                result = true
-            }
-        } catch (exception: Exception) {
-            exception.printStackTrace()
-        }
-        return result
-    }
-
-    private fun onSwipeBottom() {
-        if (isZooming || cdTimer.isRunning) return
-        wasSwiping = true
-        if (settingsDialog.isShowing) return
-
-        if (camConfig.isQRMode) {
-            if (!camConfig.scanAllCodes) {
-                camConfig.showMoreOptionsForQR()
-            }
-        } else {
-            if (settingsIcon.isEnabled) {
-                settingsIcon.performClick()
-            }
-        }
-    }
-
-    private fun onSwipeRight() {
-
-        if (isZooming || cdTimer.isRunning || videoCapturer.isRecording)
-            return
-
-        if (this is VideoOnlyActivity) return
-
-        wasSwiping = true
-        if (settingsDialog.isShowing) return
-
-
-        val i = tabLayout.selectedTabPosition - 1
-
-        Log.i(TAG, "onSwipeRight $i")
-        tabLayout.getTabAt(i)?.let {
-            finalizeMode(it)
-        }
-    }
-
-    private fun onSwipeTop() {
-        if (isZooming || cdTimer.isRunning || videoCapturer.isRecording) return
-        wasSwiping = true
-        settingsDialog.slideDialogUp()
-    }
-
-    private fun onSwipeLeft() {
-        if (isZooming || cdTimer.isRunning || videoCapturer.isRecording) return
-
-        if (this is VideoOnlyActivity) return
-
-        wasSwiping = true
-        if (settingsDialog.isShowing) return
-
-        val i = tabLayout.selectedTabPosition + 1
-        tabLayout.getTabAt(i)?.let {
-            finalizeMode(it)
-        }
-    }
-
-    override fun onSingleTapConfirmed(p0: MotionEvent): Boolean {
-        return false
-    }
-
-    override fun onDoubleTap(p0: MotionEvent): Boolean {
-        return false
-    }
-
-    override fun onDoubleTapEvent(p0: MotionEvent): Boolean {
-        return false
-    }
-
-    fun showMessage(@StringRes msg: Int, action: String? = null, callback: View.OnClickListener? = null) {
+    fun showMessage(
+        @StringRes msg: Int,
+        action: String?,
+        callback: View.OnClickListener?,
+    ) {
         showMessage(getString(msg), action, callback)
     }
 
@@ -1682,8 +1401,8 @@ open class MainActivity : AppCompatActivity(),
      * button.
      */
     fun setFlipCameraIcon(@DrawableRes icon: Int, @StringRes description: Int) {
-        flipCamIcon.setImageResource(icon)
-        flipCamIcon.contentDescription = getString(description)
+        binding.flipCameraIconContent.setImageResource(icon)
+        binding.flipCameraIconContent.contentDescription = getString(description)
     }
 
     /**
@@ -1697,13 +1416,13 @@ open class MainActivity : AppCompatActivity(),
     }
 
     /**
-     * [thirdCircle] is the view that carries the click listener, so it is the one that has to be
+     * `thirdCircle` is the view that carries the click listener, so it is the one that has to be
      * described: it opens the gallery, except while a video is being recorded, when it takes a
      * still instead.
      */
     fun setThirdCircleIcon(@DrawableRes icon: Int, @StringRes description: Int) {
-        thirdCircle.setImageResource(icon)
-        thirdCircle.contentDescription = getString(description)
+        binding.thirdCircle.setImageResource(icon)
+        binding.thirdCircle.contentDescription = getString(description)
     }
 
     /**
@@ -1724,7 +1443,11 @@ open class MainActivity : AppCompatActivity(),
         )
     }
 
-    fun showMessage(msg: String, action: String? = null, callback: View.OnClickListener? = null) {
+    fun showMessage(message: String) {
+        showMessage(message, action = null, callback = null)
+    }
+
+    fun showMessage(msg: String, action: String?, callback: View.OnClickListener?) {
         snackBar.apply {
             setText(msg)
             setAction(action, callback)
@@ -1732,9 +1455,9 @@ open class MainActivity : AppCompatActivity(),
         }
     }
 
-
     fun indicateLocationProvidedIsDisabled() {
-        showMessage(getString(R.string.location_is_disabled),
+        showMessage(
+            getString(R.string.location_is_disabled),
             if (this !is SecureMainActivity) getString(R.string.enable) else null
         ) {
             enableLocationLauncher.launch(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
@@ -1748,21 +1471,13 @@ open class MainActivity : AppCompatActivity(),
         // rotation-dependent state.
         // The preview follows the window; the capture use cases follow the sensor and are updated
         // by onOrientationChange.
-        camConfig.preview?.targetRotation = previewView.display?.rotation ?: Surface.ROTATION_0
-        camConfig.camera?.cameraInfo?.let {
-            previewView.applyPreviewRatio(camConfig.aspectRatio, it)
+        session.preview?.targetRotation =
+            previewView.display?.rotation ?: Surface.ROTATION_0
+        session.camera?.cameraInfo?.let {
+            previewView.applyPreviewRatio(viewfinder.aspectRatio, it)
         }
 
         rootView.post { sensorNotifier?.notifyListeners() }
-    }
-
-    private fun pauseOrientationSensor() {
-        SensorOrientationChangeNotifier
-            .getInstance(this)?.remove(this)
-    }
-
-    private fun resumeOrientationSensor() {
-        sensorNotifier?.addListener(this)
     }
 
     fun forceUpdateOrientationSensor() {
@@ -1776,8 +1491,10 @@ open class MainActivity : AppCompatActivity(),
 
     fun getRotation(): Int {
         val rotation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            display?.rotation ?: @Suppress("DEPRECATION")
-            windowManager.defaultDisplay.rotation
+            display?.rotation
+                ?:
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay.rotation
         } else {
             @Suppress("DEPRECATION")
             windowManager.defaultDisplay.rotation
@@ -1791,115 +1508,11 @@ open class MainActivity : AppCompatActivity(),
         }
     }
 
-    fun onDeviceAngleChange(xDegrees: Float, zDegrees: Float) {
-
-        val reverseDirection = sensorNotifier?.mOrientation == 270 || sensorNotifier?.mOrientation == 180
-
-        val xAngle = if (reverseDirection) {
-            -xDegrees
-        } else {
-            xDegrees
-        }
-
-        val zAngle = zDegrees
-
-        // If we are in photo mode and the countdown timer isn't running
-        if (!(camConfig.isQRMode || camConfig.isVideoMode || cdTimer.isRunning)) {
-
-            if (gCircle.rotation != xAngle) {
-                gCircle.rotation = xAngle
-                gLineZ.rotation = xAngle
-
-                val absXAngle = abs(xAngle).toInt()
-
-                gAngleTextView.text = getString(R.string.degree_format, absXAngle)
-                if (xAngle == 0f) {
-                    setThicknessOfGLines(4)
-                    if (shouldGyroVibrate) {
-                        shouldGyroVibrate = false
-                        hasGyroVibrated = false
-                        handler.postDelayed(gyroVibRunnable, GYRO_VIBE_WAIT_TIME)
-                    }
-                } else {
-                    handler.removeCallbacks(gyroVibRunnable)
-                    if (!hasGyroVibrated || absXAngle > 5) {
-                        shouldGyroVibrate = true
-                    }
-                    setThicknessOfGLines(2)
-                }
-            }
-
-            Log.i(TAG, "zAngle: $zAngle")
-
-            val lzAngle = when {
-                zAngle < -45 -> {
-                    -45
-                }
-                zAngle > 45 -> {
-                    45
-                }
-                else -> {
-                    zAngle
-                }
-            }.toFloat()
-
-            if (zAngle.toInt() == 0) {
-                gLineX.setBackgroundResource(R.drawable.yellow_shadow_rect)
-                gLineZ.visibility = View.GONE
-
-                gLeftDash.setBackgroundResource(R.drawable.yellow_shadow_rect)
-                gRightDash.setBackgroundResource(R.drawable.yellow_shadow_rect)
-
-                gAngleTextView.setTextColor(ContextCompat.getColor(this, R.color.z_yellow))
-
-            } else {
-                gLineX.setBackgroundResource(R.drawable.white_shadow_rect)
-                gLineZ.visibility = View.VISIBLE
-
-                gLeftDash.setBackgroundResource(R.drawable.white_shadow_rect)
-                gRightDash.setBackgroundResource(R.drawable.white_shadow_rect)
-
-                gAngleTextView.setTextColor(ContextCompat.getColor(this, android.R.color.white))
-            }
-
-            val zOffset = (lzAngle / 60) * dp32
-
-            gLineZ.layoutParams = (gLineZ.layoutParams as ViewGroup.MarginLayoutParams).let {
-                it.setMargins(
-                    it.leftMargin,
-                    it.topMargin,
-                    it.rightMargin,
-                    zOffset.toInt(),
-                )
-                it
-            }
-        }
-    }
-
-    private val dp32 by lazy {
+    internal val dp32 by lazy {
         32 * resources.displayMetrics.density
     }
 
-    private fun setThicknessOfGLines(dp: Int) {
-        val t = dp * resources.displayMetrics.density
-
-        gLeftDash.layoutParams = gLeftDash.layoutParams.let {
-            it.height = t.toInt()
-            it
-        }
-
-        gRightDash.layoutParams = gRightDash.layoutParams.let {
-            it.height = t.toInt()
-            it
-        }
-
-        gLineX.layoutParams = gLineX.layoutParams.let {
-            it.height = t.toInt()
-            it
-        }
-    }
-
-    private fun vibrateDevice() {
+    internal fun vibrateDevice() {
         val vibrator = getSystemService(Vibrator::class.java)
         vibrator?.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK))
     }
@@ -1909,10 +1522,11 @@ open class MainActivity : AppCompatActivity(),
         SensorOrientationChangeNotifier.clearInstance()
         thumbnailLoaderExecutor.shutdownNow()
         frameCopyThread?.quitSafely()
-        camConfig.onDestroy()
+        viewfinder.onDestroy()
+        capturedItemSession.close()
     }
 
-    fun locationCamConfigChanged(required: Boolean) {
+    fun onRequireLocationChanged(required: Boolean) {
         if (required) {
             requestLocation()
         } else {
@@ -1925,7 +1539,7 @@ open class MainActivity : AppCompatActivity(),
     ) {
         // The snackbar that leads here outlives a mode switch, so geo-tagging can be off for the
         // mode this returns to
-        if (camConfig.requireLocation) {
+        if (viewfinder.requireLocation) {
             requestLocation(application.isAnyLocationProvideActive())
         }
     }
@@ -1937,17 +1551,19 @@ open class MainActivity : AppCompatActivity(),
         if (!application.shouldAskForLocationPermission()) {
             requestLocation()
         } else {
-            camConfig.requireLocation = false
+            viewfinder.requireLocation = false
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun requestLocation(reAttach: Boolean = false) {
-
         when {
             ActivityCompat.shouldShowRequestPermissionRationale(
-                this, Manifest.permission.ACCESS_FINE_LOCATION
+                this,
+                Manifest.permission.ACCESS_FINE_LOCATION
             ) && ActivityCompat.shouldShowRequestPermissionRationale(
-                this, Manifest.permission.ACCESS_COARSE_LOCATION
+                this,
+                Manifest.permission.ACCESS_COARSE_LOCATION
             ) -> {
                 MaterialAlertDialogBuilder(this).let {
                     it.setTitle(R.string.location_permission_dialog_title)
@@ -1962,23 +1578,15 @@ open class MainActivity : AppCompatActivity(),
                     }
 
                     it.setOnDismissListener {
-                        if (ContextCompat.checkSelfPermission(
-                                this, Manifest.permission.ACCESS_COARSE_LOCATION
-                            ) != PackageManager.PERMISSION_GRANTED
-                        ) {
-                            camConfig.requireLocation = false
+                        if (!hasPermission(Manifest.permission.ACCESS_COARSE_LOCATION)) {
+                            viewfinder.requireLocation = false
                         }
                     }
                 }.showIgnoringShortEdgeMode()
             }
 
-            (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-                    == PackageManager.PERMISSION_GRANTED
-                    || ActivityCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACCESS_COARSE_LOCATION
-            )
-                    == PackageManager.PERMISSION_GRANTED) -> {
+            hasPermission(Manifest.permission.ACCESS_FINE_LOCATION) ||
+                hasPermission(Manifest.permission.ACCESS_COARSE_LOCATION) -> {
                 application.requestLocationUpdates(reAttach)
             }
             else -> {
@@ -2016,7 +1624,7 @@ open class MainActivity : AppCompatActivity(),
     var isThumbnailLoaded = false
 
     fun updateThumbnail() {
-        val item = camConfig.lastCapturedItem
+        val item = capturedItemSession.lastCapturedItem
         val preview = imagePreview
         preview.setImageBitmap(null)
         isThumbnailLoaded = false
@@ -2052,7 +1660,7 @@ open class MainActivity : AppCompatActivity(),
 
             if (bitmap != null) {
                 mainExecutor.execute {
-                    if (isStarted && camConfig.lastCapturedItem == item) {
+                    if (isStarted && capturedItemSession.lastCapturedItem == item) {
                         preview.setImageBitmap(bitmap)
                         isThumbnailLoaded = true
                     }
@@ -2068,5 +1676,19 @@ open class MainActivity : AppCompatActivity(),
             shouldRestartRecording = false
             videoCapturer.startRecording()
         }
+    }
+
+    private lateinit var cameraControl: CameraControl
+
+    companion object {
+        private const val TAG = "GOCam"
+        private const val autoCenterFocusDuration = 2000L
+        private val hexArray = "0123456789ABCDEF".toCharArray()
+
+        private const val PREFETCH_FRESHNESS_MS = 2_000L
+
+        // One preview frame at 30fps, the wait for the camera to fill the surface again.
+        private const val FRAME_COPY_RETRY_DELAY_MS = 33L
+        private const val FRAME_COPY_RETRIES = 3
     }
 }

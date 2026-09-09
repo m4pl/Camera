@@ -18,9 +18,10 @@ import androidx.camera.core.ZoomState
 import androidx.transition.Fade
 import androidx.transition.Transition
 import androidx.transition.TransitionManager
-import app.grapheneos.camera.CamConfig
 import app.grapheneos.camera.R
+import app.grapheneos.camera.data.camera.session.CameraSession
 import app.grapheneos.camera.ui.activities.MainActivity
+import app.grapheneos.camera.ui.viewfinder.screen.ViewfinderController
 import kotlin.math.roundToInt
 
 class ZoomBar : AppCompatSeekBar {
@@ -46,11 +47,14 @@ class ZoomBar : AppCompatSeekBar {
         .inflate(R.layout.zoom_bar_thumb, null, false)
 
     private lateinit var mainActivity: MainActivity
-    private lateinit var camConfig: CamConfig
+    private lateinit var viewfinder: ViewfinderController
+
+    private lateinit var session: CameraSession
 
     fun setMainActivity(mainActivity: MainActivity) {
         this.mainActivity = mainActivity
-        camConfig = mainActivity.camConfig
+        viewfinder = mainActivity.viewfinder
+        session = mainActivity.session
     }
 
     fun showPanel() {
@@ -85,7 +89,7 @@ class ZoomBar : AppCompatSeekBar {
     }
 
     fun updateThumb(shouldShowPanel: Boolean = true) {
-        val zoomState: ZoomState? = camConfig.zoomState
+        val zoomState: ZoomState? = session.zoomState
 
         if (shouldShowPanel) {
             showPanel()
@@ -147,7 +151,7 @@ class ZoomBar : AppCompatSeekBar {
                 if (progress < 1) progress = 1
                 if (progress > 100) progress = 100
 
-                camConfig.camera?.cameraControl?.setLinearZoom(progress / 100f)
+                session.camera?.cameraControl?.setLinearZoom(progress / 100f)
 
             }
             MotionEvent.ACTION_CANCEL -> {

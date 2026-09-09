@@ -42,10 +42,10 @@ class CameraModeTabsRegressionTest {
             awaitModeTabs(scenario)
 
             scenario.onActivity { activity ->
-                activity.camConfig.switchMode(CameraMode.VIDEO)
+                activity.viewfinder.switchMode(CameraMode.VIDEO)
                 assertEquals(CameraMode.VIDEO, activity.tabLayout.selectedTab?.tag)
 
-                activity.camConfig.switchMode(CameraMode.CAMERA)
+                activity.viewfinder.switchMode(CameraMode.CAMERA)
                 assertEquals(CameraMode.CAMERA, activity.tabLayout.selectedTab?.tag)
             }
         }
@@ -60,7 +60,7 @@ class CameraModeTabsRegressionTest {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             awaitModeTabs(scenario)
 
-            scenario.onActivity { it.camConfig.switchMode(CameraMode.VIDEO) }
+            scenario.onActivity { it.viewfinder.switchMode(CameraMode.VIDEO) }
 
             // Counting passes rather than reading isLayoutRequested: a request issued from inside a
             // layout pass is parked for the next traversal and the flag is cleared on the way, so it
@@ -116,7 +116,7 @@ class CameraModeTabsRegressionTest {
             scenario.onActivity { activity ->
                 val tabs = activity.tabLayout
                 val next = tabs.getTabAt(tabs.selectedTabPosition + 1)
-                assertNotNull("no mode to the left of ${activity.camConfig.currentMode}", next)
+                assertNotNull("no mode to the left of ${activity.viewfinder.currentMode}", next)
                 nextMode = next!!.tag as CameraMode
 
                 flingLeft(activity)
@@ -125,26 +125,26 @@ class CameraModeTabsRegressionTest {
             // The strip slides to the new mode before the camera rebinds, so the switch lands a
             // few frames after the fling rather than inside it.
             waitUntil(scenario, "the fling switched the mode to $nextMode") {
-                it.camConfig.currentMode == nextMode
+                it.viewfinder.currentMode == nextMode
             }
         }
 
         launchCaptureSession(CaptureActivity::class.java, MediaStore.ACTION_IMAGE_CAPTURE)
             .use { scenario ->
-                waitUntil(scenario, "camera is bound") { it.camConfig.camera != null }
+                waitUntil(scenario, "camera is bound") { it.session.camera != null }
 
                 // Flinging before the tabs were built would pass whether or not any get built
                 Thread.sleep(TAB_BUILD_DWELL_MS)
 
                 scenario.onActivity { activity ->
                     flingLeft(activity)
-                    assertEquals(CameraMode.CAMERA, activity.camConfig.currentMode)
+                    assertEquals(CameraMode.CAMERA, activity.viewfinder.currentMode)
                 }
             }
     }
 
     private fun <A : MainActivity> assertNoModeTabs(scenario: ActivityScenario<A>) {
-        waitUntil(scenario, "camera is bound") { it.camConfig.camera != null }
+        waitUntil(scenario, "camera is bound") { it.session.camera != null }
 
         // Asserting straight after the bind would also hold while a build was merely still
         // pending, so outlast the extension probe round that used to precede one.
