@@ -1,10 +1,11 @@
 package app.grapheneos.camera.ui.viewfinder.screen.mapper
 
-import androidx.camera.core.AspectRatio
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageCapture
 import app.grapheneos.camera.R
+import app.grapheneos.camera.data.camera.model.LensFacing
+import app.grapheneos.camera.data.core.model.AspectRatio
 import app.grapheneos.camera.data.core.model.CameraMode
+import app.grapheneos.camera.data.core.model.FlashMode
+import app.grapheneos.camera.data.core.model.VideoQuality
 import app.grapheneos.camera.data.settings.model.CameraSettings
 import app.grapheneos.camera.data.settings.model.GridType
 import app.grapheneos.camera.data.settings.model.ModeSettings
@@ -13,6 +14,7 @@ import app.grapheneos.camera.ui.viewfinder.screen.model.ViewfinderSessionState
 import app.grapheneos.camera.ui.viewfinder.screen.model.ViewfinderState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -26,7 +28,7 @@ class SettingsSheetUiStateMapperTest {
     private fun map(
         mode: CameraMode = CameraMode.CAMERA,
         requiresVideoModeOnly: Boolean = false,
-        flashMode: Int = ImageCapture.FLASH_MODE_OFF,
+        flashMode: FlashMode = FlashMode.OFF,
         requireLocation: Boolean = false,
         settings: CameraSettings = CameraSettings(),
         modeSettings: ModeSettings = ModeSettings(),
@@ -51,9 +53,9 @@ class SettingsSheetUiStateMapperTest {
 
     @Test
     fun flash_followsTheModeItWasSetTo() {
-        val on = map(flashMode = ImageCapture.FLASH_MODE_ON, session = sessionWithFlash())
-        val auto = map(flashMode = ImageCapture.FLASH_MODE_AUTO, session = sessionWithFlash())
-        val off = map(flashMode = ImageCapture.FLASH_MODE_OFF, session = sessionWithFlash())
+        val on = map(flashMode = FlashMode.ON, session = sessionWithFlash())
+        val auto = map(flashMode = FlashMode.AUTO, session = sessionWithFlash())
+        val off = map(flashMode = FlashMode.OFF, session = sessionWithFlash())
 
         assertEquals(R.drawable.flash_on_circle, on.flashIcon)
         assertEquals(R.string.flash_on, on.flashDescription)
@@ -68,7 +70,7 @@ class SettingsSheetUiStateMapperTest {
     @Test
     fun flash_unavailable_readsAsOffWhateverWasStored() {
         val state = map(
-            flashMode = ImageCapture.FLASH_MODE_ON,
+            flashMode = FlashMode.ON,
             session = ViewfinderSessionState(isFlashAvailable = false),
         )
 
@@ -107,8 +109,8 @@ class SettingsSheetUiStateMapperTest {
 
     @Test
     fun selfIlluminationRow_isForTheFrontLensOnly() {
-        val front = ViewfinderSessionState(lensFacing = CameraSelector.LENS_FACING_FRONT)
-        val back = ViewfinderSessionState(lensFacing = CameraSelector.LENS_FACING_BACK)
+        val front = ViewfinderSessionState(lensFacing = LensFacing.FRONT)
+        val back = ViewfinderSessionState(lensFacing = LensFacing.BACK)
 
         assertTrue(map(session = front).selfIlluminationSettingVisible)
         assertFalse(map(session = back).selfIlluminationSettingVisible)
@@ -131,7 +133,7 @@ class SettingsSheetUiStateMapperTest {
     fun selfIlluminationToggle_isTheStoredValueNotTheEffectiveOne() {
         val state = map(
             modeSettings = ModeSettings(selfIllumination = true),
-            session = ViewfinderSessionState(lensFacing = CameraSelector.LENS_FACING_BACK),
+            session = ViewfinderSessionState(lensFacing = LensFacing.BACK),
         )
 
         assertTrue(state.selfIllumination)
@@ -160,5 +162,55 @@ class SettingsSheetUiStateMapperTest {
         assertEquals(GridType.entries.size, byType.values.map { it.gridDescription }.toSet().size)
         assertEquals(R.drawable.grid_off_circle, byType.getValue(GridType.NONE).gridIcon)
         assertEquals(R.string.grid_off, byType.getValue(GridType.NONE).gridDescription)
+    }
+
+    @Test
+    fun videoQuality_theStoredOne_isSelectedAmongTheOffered() {
+        val state = map(
+            modeSettings = ModeSettings(videoQuality = VideoQuality.FHD),
+            session = ViewfinderSessionState(videoQualities = OFFERED_QUALITIES),
+        )
+
+        assertEquals(OFFERED_QUALITIES, state.videoQualities)
+        assertEquals(1, state.videoQualityPosition)
+    }
+
+    @Test
+    fun videoQuality_leftToTheDevice_selectsTheHighestOffered() {
+        val state = map(
+            modeSettings = ModeSettings(videoQuality = VideoQuality.HIGHEST),
+            session = ViewfinderSessionState(videoQualities = OFFERED_QUALITIES),
+        )
+
+        assertEquals(0, state.videoQualityPosition)
+    }
+
+    @Test
+    fun videoQuality_notOfferedByThisCamera_selectsNothing() {
+        val state = map(
+            modeSettings = ModeSettings(videoQuality = VideoQuality.SD),
+            session = ViewfinderSessionState(videoQualities = OFFERED_QUALITIES),
+        )
+
+        assertNull(state.videoQualityPosition)
+    }
+
+    @Test
+    fun videoQuality_beforeTheQualitiesAreKnown_selectsNothing() {
+        val state = map(modeSettings = ModeSettings(videoQuality = VideoQuality.HIGHEST))
+
+        assertNull(state.videoQualityPosition)
+    }
+
+    @Test
+    fun torch_followsTheSession() {
+        val state = map(session = ViewfinderSessionState(isFlashAvailable = true, isTorchOn = true))
+
+        assertTrue(state.torchAvailable)
+        assertTrue(state.torchOn)
+    }
+
+    private companion object {
+        val OFFERED_QUALITIES = listOf(VideoQuality.UHD, VideoQuality.FHD, VideoQuality.HD)
     }
 }

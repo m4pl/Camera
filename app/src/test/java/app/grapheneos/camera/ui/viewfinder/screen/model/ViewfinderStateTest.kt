@@ -1,10 +1,11 @@
 package app.grapheneos.camera.ui.viewfinder.screen.model
 
-import androidx.camera.core.AspectRatio
-import androidx.camera.core.CameraSelector
+import app.grapheneos.camera.data.camera.model.LensFacing
+import app.grapheneos.camera.data.core.model.AspectRatio
 import app.grapheneos.camera.data.core.model.CameraMode
 import app.grapheneos.camera.data.settings.model.CameraSettings
 import app.grapheneos.camera.data.settings.model.ModeSettings
+import com.google.zxing.BarcodeFormat
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -56,8 +57,8 @@ class ViewfinderStateTest {
     @Test
     fun selfIlluminate_needsTheSettingAndTheFrontLens() {
         val enabled = ModeSettings(selfIllumination = true)
-        val front = ViewfinderSessionState(lensFacing = CameraSelector.LENS_FACING_FRONT)
-        val back = ViewfinderSessionState(lensFacing = CameraSelector.LENS_FACING_BACK)
+        val front = ViewfinderSessionState(lensFacing = LensFacing.FRONT)
+        val back = ViewfinderSessionState(lensFacing = LensFacing.BACK)
 
         assertTrue(state(modeSettings = enabled, session = front).selfIlluminate())
         assertFalse(state(modeSettings = enabled, session = back).selfIlluminate())
@@ -78,5 +79,27 @@ class ViewfinderStateTest {
             modeSettings = modeSettings,
             session = session,
         )
+    }
+
+    @Test
+    fun barcodeFormats_scanningAllCodes_areEveryFormat() {
+        val state = state(
+            mode = CameraMode.QR_SCAN,
+            settings = CameraSettings(scanAllCodes = true),
+        )
+
+        assertEquals(BarcodeFormat.entries.toSet(), state.barcodeFormats())
+    }
+
+    @Test
+    fun barcodeFormats_otherwise_areTheEnabledOnes() {
+        val state = state(
+            mode = CameraMode.QR_SCAN,
+            settings = CameraSettings(
+                enabledBarcodeFormats = setOf(BarcodeFormat.AZTEC.name, BarcodeFormat.QR_CODE.name),
+            ),
+        )
+
+        assertEquals(setOf(BarcodeFormat.AZTEC, BarcodeFormat.QR_CODE), state.barcodeFormats())
     }
 }

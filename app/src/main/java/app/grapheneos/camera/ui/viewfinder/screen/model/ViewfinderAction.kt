@@ -1,7 +1,8 @@
 package app.grapheneos.camera.ui.viewfinder.screen.model
 
-import androidx.camera.video.Quality
 import app.grapheneos.camera.data.core.model.CameraMode
+import app.grapheneos.camera.data.core.model.VideoQuality
+import app.grapheneos.camera.ui.viewfinder.screen.ViewfinderHost
 
 sealed interface ViewfinderAction {
 
@@ -14,6 +15,29 @@ sealed interface ViewfinderAction {
         data object TorchToggleClicked : CameraAction
 
         data object AspectRatioToggleClicked : CameraAction
+
+        data object ZoomInKeyPressed : CameraAction
+
+        data object ZoomOutKeyPressed : CameraAction
+
+        data object FocusKeyPressed : CameraAction
+
+        data class PreviewTapped(
+            val x: Float,
+            val y: Float,
+        ) : CameraAction
+
+        data class PreviewPinched(
+            val scaleFactor: Float,
+        ) : CameraAction
+
+        data class ZoomSliderDragged(
+            val linearZoom: Float,
+        ) : CameraAction
+
+        data class ExposureSliderDragged(
+            val compensationIndex: Int,
+        ) : CameraAction
 
         data class ModeSelected(
             val mode: CameraMode,
@@ -50,6 +74,12 @@ sealed interface ViewfinderAction {
         data object QrResultDismissed : LifecycleAction
 
         data object CapturedPreviewDismissed : LifecycleAction
+
+        data object ScreenDestroyed : LifecycleAction
+
+        data class ScreenCreated(
+            val host: ViewfinderHost,
+        ) : LifecycleAction
     }
 
     sealed interface SettingsAction : ViewfinderAction {
@@ -87,7 +117,7 @@ sealed interface ViewfinderAction {
         ) : SettingsAction
 
         data class VideoQualitySelected(
-            val quality: Quality,
+            val quality: VideoQuality,
         ) : SettingsAction
     }
 }

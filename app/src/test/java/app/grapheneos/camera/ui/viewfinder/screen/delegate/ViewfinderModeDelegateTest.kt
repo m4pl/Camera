@@ -1,12 +1,12 @@
 package app.grapheneos.camera.ui.viewfinder.screen.delegate
 
-import androidx.camera.extensions.ExtensionMode
 import app.grapheneos.camera.data.core.model.CameraMode
 import app.grapheneos.camera.ui.viewfinder.screen.ViewfinderStateHolder
 import app.grapheneos.camera.ui.viewfinder.screen.model.ViewfinderState
 import app.grapheneos.camera.ui.viewfinder.screen.model.ViewfinderUiState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -24,7 +24,7 @@ class ViewfinderModeDelegateTest {
     fun defaultMode_usesNoExtension() {
         val delegate = createDelegate()
 
-        assertEquals(ExtensionMode.NONE, delegate.defaultMode.extensionMode)
+        assertNull(delegate.defaultMode.extensionMode)
     }
 
     @Test

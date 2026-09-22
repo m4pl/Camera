@@ -1,90 +1,74 @@
 package app.grapheneos.camera.ui.viewfinder.screen.delegate
 
-import androidx.camera.core.CameraSelector
-import app.grapheneos.camera.R
 import app.grapheneos.camera.data.camera.model.BindOutcome
 import app.grapheneos.camera.data.camera.model.CameraBindSettings
 import app.grapheneos.camera.data.camera.model.CameraSessionEvent
+import app.grapheneos.camera.data.camera.model.LensFacing
 import app.grapheneos.camera.data.camera.session.CameraSession
-import app.grapheneos.camera.data.camera.session.CameraSessionEnvironment
-import app.grapheneos.camera.data.camera.session.oppositeLensFacing
-import app.grapheneos.camera.data.camera.session.supportedLensFacing
-import app.grapheneos.camera.data.core.model.CameraMode
-import app.grapheneos.camera.domain.camera.model.CameraEntryPoint
+import app.grapheneos.camera.data.core.model.ExtensionMode
+import app.grapheneos.camera.data.core.model.FlashMode
+import app.grapheneos.camera.di.core.MainImmediateDispatcher
 import app.grapheneos.camera.domain.camera.usecase.ResolveAvailableModes
-import app.grapheneos.camera.ui.viewfinder.screen.ViewfinderChrome
+import app.grapheneos.camera.domain.core.model.CameraEntryPoint
+import app.grapheneos.camera.ui.viewfinder.screen.ViewfinderHost
 import app.grapheneos.camera.ui.viewfinder.screen.ViewfinderStateHolder
 import app.grapheneos.camera.ui.viewfinder.screen.model.ViewfinderBindTarget
-import app.grapheneos.camera.ui.viewfinder.screen.model.ViewfinderScreenEffect as Effect
-import app.grapheneos.camera.ui.viewfinder.screen.model.ViewfinderSessionState
 import javax.inject.Inject
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 
 interface ViewfinderCameraDelegate {
-    val lensFacing: Int
+    val lensFacing: LensFacing
     val isProviderReady: Boolean
     val sessionEvents: Flow<CameraSessionEvent>
 
-    fun bind(stateHolder: ViewfinderStateHolder)
-
-    fun attach(
-        environment: CameraSessionEnvironment,
-        chrome: ViewfinderChrome,
-        session: CameraSession,
-        emitEffect: (Effect) -> Unit,
+    fun bind(
+        scope: CoroutineScope,
+        stateHolder: ViewfinderStateHolder,
     )
 
-    fun detach()
+    fun onScreenCreated(host: ViewfinderHost)
+    fun onScreenDestroyed()
 
-    fun initialize(forced: Boolean, extensionMode: Int)
+    fun initialize(forced: Boolean, extensionMode: ExtensionMode?)
     fun beginBind(forced: Boolean): Boolean
-    fun selectLens(isQrMode: Boolean, extensionMode: Int): ViewfinderBindTarget?
+    fun selectLens(isQrMode: Boolean, extensionMode: ExtensionMode?): ViewfinderBindTarget?
     fun bindCamera(settings: CameraBindSettings): BindOutcome
-    fun announceBind(aspectRatio: Int, isInPhotoMode: Boolean, currentMode: () -> CameraMode)
+    fun announceBind()
 
-    fun toggleLensFacing(extensionMode: Int): Boolean
-    fun applyFlashMode(value: Int)
+    fun switchLensFacing(lensFacing: LensFacing, extensionMode: ExtensionMode?): Boolean
+    fun applyFlashMode(value: FlashMode)
     fun toggleTorch()
+    fun stepZoom(step: Float)
+    fun scaleZoom(scaleFactor: Float)
+    fun setLinearZoom(linearZoom: Float)
+    fun setExposureCompensation(compensationIndex: Int)
+    fun focusAt(x: Float, y: Float, autoCancelSeconds: Long)
+    fun cancelFocus()
     fun onZoomStateChanged()
-    fun refreshQrHints()
-    fun cancelFocusTimer()
-    fun shouldAskForLocationPermission(): Boolean
+    fun refreshVideoQualities()
+    fun showQrResult(): Boolean
+    fun dismissQrResult()
 }
 
 internal class ViewfinderCameraDelegateImpl @Inject constructor(
+    private val session: CameraSession,
     private val entryPoint: CameraEntryPoint,
     private val resolveAvailableModes: ResolveAvailableModes,
+    @MainImmediateDispatcher private val mainDispatcher: CoroutineDispatcher,
 ) : ViewfinderCameraDelegate {
 
     private lateinit var stateHolder: ViewfinderStateHolder
 
     private var isBound = false
 
-    private var attachment: Attachment? = null
+    private var host: ViewfinderHost? = null
 
-    private val attached: Attachment
-        get() {
-            return requireNotNull(attachment) {
-                "No Activity is attached to the viewfinder"
-            }
-        }
-
-    private val environment: CameraSessionEnvironment
-        get() {
-            return attached.environment
-        }
-
-    private val chrome: ViewfinderChrome
-        get() {
-            return attached.chrome
-        }
-
-    private val session: CameraSession
-        get() {
-            return attached.session
-        }
-
-    override val lensFacing: Int
+    override val lensFacing: LensFacing
         get() {
             return session.lensFacing
         }
@@ -99,37 +83,40 @@ internal class ViewfinderCameraDelegateImpl @Inject constructor(
             return session.events
         }
 
-    override fun bind(stateHolder: ViewfinderStateHolder) {
+    override fun bind(
+        scope: CoroutineScope,
+        stateHolder: ViewfinderStateHolder,
+    ) {
         if (isBound) return
         isBound = true
 
         this.stateHolder = stateHolder
+
+        scope.launch(mainDispatcher) {
+            stateHolder.state
+                .map { it.barcodeFormats() }
+                .distinctUntilChanged()
+                .collect { session.setBarcodeFormats(it) }
+        }
     }
 
-    override fun attach(
-        environment: CameraSessionEnvironment,
-        chrome: ViewfinderChrome,
-        session: CameraSession,
-        emitEffect: (Effect) -> Unit,
-    ) {
-        attachment = Attachment(
-            environment = environment,
-            chrome = chrome,
-            session = session,
-            emitEffect = emitEffect,
-        )
-
-        refreshSessionState()
+    override fun onScreenCreated(host: ViewfinderHost) {
+        this.host = host
+        session.setPreviewTarget(host.previewTarget)
     }
 
-    override fun detach() {
-        attachment = null
-        stateHolder.update { it.copy(session = ViewfinderSessionState()) }
+    override fun onScreenDestroyed() {
+        host = null
+        session.setPreviewTarget(null)
+
+        stateHolder.update {
+            it.copy(session = it.session.copy(isQrResultShown = false))
+        }
     }
 
     override fun initialize(
         forced: Boolean,
-        extensionMode: Int,
+        extensionMode: ExtensionMode?,
     ) {
         session.initialize(
             forced = forced,
@@ -138,22 +125,23 @@ internal class ViewfinderCameraDelegateImpl @Inject constructor(
     }
 
     override fun beginBind(forced: Boolean): Boolean {
-        if ((!forced && session.camera != null) || session.cameraProvider == null) return false
+        val host = host?.takeIf {
+            session.cameraProvider != null && (forced || session.camera == null)
+        } ?: return false
 
-        // Cancel any pending capture requests
-        chrome.cancelPendingCapture()
-        chrome.hideExposurePanel()
+        host.chrome.cancelPendingCapture()
 
         return true
     }
 
-    override fun selectLens(isQrMode: Boolean, extensionMode: Int): ViewfinderBindTarget? {
-        val rotation = environment.displayRotation
+    override fun selectLens(
+        isQrMode: Boolean,
+        extensionMode: ExtensionMode?,
+    ): ViewfinderBindTarget? {
+        val host = host?.takeIf { session.isActive } ?: return null
 
-        if (!environment.isSessionActive) return null
-
-        // Silent: a lens the user picks is refused, with a message, in toggleLensFacing().
-        session.lensFacing = supportedLensFacing(preferred = session.lensFacing) {
+        // Silent: ViewfinderViewModel.switchLens() refuses a lens the user picks, with a message.
+        session.lensFacing = session.lensFacing.supportedOrOpposite {
             session.isLensFacingSupported(
                 lensFacing = it,
                 extensionMode = extensionMode,
@@ -162,161 +150,199 @@ internal class ViewfinderCameraDelegateImpl @Inject constructor(
 
         session.selectLensFacing(session.lensFacing)
 
-        // To use the last frame instead of showing a blank screen when
-        // the camera that is being currently used gets unbind
-        chrome.updateLastFrame()
+        host.previewFrames.holdCurrentFrame()
 
         val qrLensFacing = when {
-            isQrMode -> {
-                chrome.startFocusTimer()
-                qrLensFacing(extensionMode)
-            }
-
+            isQrMode -> qrLensFacing(extensionMode)
             else -> null
         }
 
-        return ViewfinderBindTarget(
-            rotation = rotation,
-            qrLensFacing = qrLensFacing,
-        )
+        return ViewfinderBindTarget(qrLensFacing = qrLensFacing)
     }
 
     override fun bindCamera(settings: CameraBindSettings): BindOutcome {
-        chrome.forceUpdateOrientationSensor()
+        host?.chrome?.forceUpdateOrientationSensor()
 
         val outcome = session.bind(settings)
 
-        refreshSessionState()
+        refreshSessionState(isVideoMode = settings.isVideoMode)
 
         return outcome
     }
 
-    override fun announceBind(
-        aspectRatio: Int,
-        isInPhotoMode: Boolean,
-        currentMode: () -> CameraMode,
-    ) {
-        loadTabs(currentMode)
+    override fun announceBind() {
+        loadTabs()
 
         session.reattachZoomState()
 
-        chrome.updateZoomThumb()
-        emitEffect(Effect.HideZoomPanel)
-
-        session.camera?.cameraInfo?.exposureState?.let { chrome.applyExposureState(it) }
-
-        emitEffect(Effect.ResetTorchToggle)
-
-        session.camera?.cameraInfo?.let { chrome.onPreviewBound(aspectRatio, it) }
-
-        chrome.updateGyroscopeIndicator(isInPhotoMode)
+        stateHolder.update {
+            it.copy(
+                session = it.session.copy(
+                    zoom = session.zoom,
+                    exposure = session.exposure,
+                ),
+            )
+        }
     }
 
-    override fun toggleLensFacing(extensionMode: Int): Boolean {
-        val toggled = oppositeLensFacing(session.lensFacing)
+    override fun switchLensFacing(
+        lensFacing: LensFacing,
+        extensionMode: ExtensionMode?,
+    ): Boolean {
         val isSupported = session.isLensFacingSupported(
-            lensFacing = toggled,
-            extensionMode = extensionMode
+            lensFacing = lensFacing,
+            extensionMode = extensionMode,
         )
 
         if (isSupported) {
-            session.lensFacing = toggled
-            return true
+            session.lensFacing = lensFacing
         }
 
-        val message = when (toggled) {
-            CameraSelector.LENS_FACING_BACK -> R.string.rear_camera_unavailable
-            else -> R.string.front_camera_unavailable
-        }
-
-        emitEffect(Effect.ShowMessage(message))
-
-        return false
+        return isSupported
     }
 
-    override fun applyFlashMode(value: Int) {
-        session.imageCapture?.flashMode = value
-        stateHolder.update { it.copy(flashMode = value) }
+    override fun applyFlashMode(value: FlashMode) {
+        session.setFlashMode(value)
+        stateHolder.update {
+            it.copy(flashMode = value)
+        }
     }
 
     override fun toggleTorch() {
         session.toggleTorchState()
 
-        stateHolder.update { it.copy(session = it.session.copy(isTorchOn = session.isTorchOn)) }
+        stateHolder.update {
+            it.copy(session = it.session.copy(isTorchOn = session.isTorchOn))
+        }
+    }
+
+    override fun stepZoom(step: Float) {
+        val zoom = session.zoom ?: return
+        val requested = zoom.zoomRatio + step
+
+        val zoomRatio = when {
+            requested > zoom.maxZoomRatio -> zoom.maxZoomRatio
+            requested < zoom.minZoomRatio -> zoom.minZoomRatio
+            // smoothly transition between wide angle camera to primary one
+            zoom.zoomRatio < 1f && requested > 1f -> 1f
+            else -> requested
+        }
+
+        session.setZoomRatio(zoomRatio)
+    }
+
+    override fun scaleZoom(scaleFactor: Float) {
+        val zoomRatio = session.zoom?.let { it.zoomRatio * scaleFactor } ?: 1f
+
+        session.setZoomRatio(zoomRatio)
+    }
+
+    override fun setLinearZoom(linearZoom: Float) {
+        session.setLinearZoom(linearZoom)
+    }
+
+    override fun setExposureCompensation(compensationIndex: Int) {
+        session.setExposureCompensationIndex(compensationIndex)
+
+        stateHolder.update {
+            val exposure = it.session.exposure?.copy(compensationIndex = compensationIndex)
+
+            it.copy(session = it.session.copy(exposure = exposure))
+        }
+    }
+
+    override fun focusAt(
+        x: Float,
+        y: Float,
+        autoCancelSeconds: Long,
+    ) {
+        session.startFocusAndMetering(
+            x = x,
+            y = y,
+            autoCancelSeconds = autoCancelSeconds,
+        )
+    }
+
+    override fun cancelFocus() {
+        session.cancelFocusAndMetering()
     }
 
     override fun onZoomStateChanged() {
-        chrome.updateZoomThumb()
-        emitEffect(Effect.ShowZoomPanel)
+        stateHolder.update {
+            it.copy(session = it.session.copy(zoom = session.zoom))
+        }
     }
 
-    override fun refreshQrHints() {
-        session.refreshQrHints()
+    override fun refreshVideoQualities() {
+        val videoQualities = session.supportedVideoQualities()
+
+        stateHolder.update {
+            it.copy(session = it.session.copy(videoQualities = videoQualities))
+        }
     }
 
-    override fun cancelFocusTimer() {
-        chrome.cancelFocusTimer()
+    override fun showQrResult(): Boolean {
+        if (stateHolder.state.value.session.isQrResultShown) return false
+
+        session.unbind()
+
+        stateHolder.update { it.copy(session = it.session.copy(isQrResultShown = true)) }
+
+        return true
     }
 
-    override fun shouldAskForLocationPermission(): Boolean {
-        return environment.shouldAskForLocationPermission()
+    override fun dismissQrResult() {
+        stateHolder.update { it.copy(session = it.session.copy(isQrResultShown = false)) }
     }
 
-    private fun emitEffect(effect: Effect) {
-        attached.emitEffect(effect)
+    private fun refreshSessionState(isVideoMode: Boolean) {
+        stateHolder.update {
+            it.copy(
+                session = it.session.copy(
+                    lensFacing = session.lensFacing,
+                    canTakePicture = session.imageCapture != null,
+                    isFlashAvailable = session.isFlashAvailable,
+                    canApplyVideoStabilization = isVideoMode &&
+                        session.canApplyVideoStabilization(),
+                    isTorchOn = false,
+                    isZslSupported = session.isZslSupported,
+                    sensorOrientationDegrees = session.sensorOrientationDegrees,
+                ),
+            )
+        }
     }
 
-    private fun refreshSessionState() {
-        val sessionState = ViewfinderSessionState(
-            lensFacing = session.lensFacing,
-            canTakePicture = session.imageCapture != null,
-            isFlashAvailable = session.isFlashAvailable,
-            canApplyVideoStabilization = session.canApplyVideoStabilization(),
-        )
-
-        stateHolder.update { it.copy(session = sessionState) }
-    }
-
-    private fun qrLensFacing(extensionMode: Int): Int {
+    private fun qrLensFacing(extensionMode: ExtensionMode?): LensFacing {
         val isRearLensSupported = session.isLensFacingSupported(
-            lensFacing = CameraSelector.LENS_FACING_BACK,
+            lensFacing = LensFacing.BACK,
             extensionMode = extensionMode,
         )
 
-        if (isRearLensSupported) {
-            return CameraSelector.LENS_FACING_BACK
+        return when {
+            isRearLensSupported -> LensFacing.BACK
+            else -> LensFacing.FRONT
         }
-
-        emitEffect(Effect.ShowMessage(R.string.qr_rear_camera_unavailable))
-
-        return CameraSelector.LENS_FACING_FRONT
     }
 
-    private fun loadTabs(currentMode: () -> CameraMode) {
+    private fun loadTabs() {
         if (!entryPoint.showsCameraModeTabs) {
             return
         }
 
         session.probeUnknownExtensions(
-            onRestart = { loadTabs(currentMode) },
-            onSettled = { buildTabs(currentMode()) },
+            onRestart = { loadTabs() },
+            onSettled = { buildTabs() },
         )
     }
 
-    private fun buildTabs(currentMode: CameraMode) {
-        chrome.setCameraModeTabs(
-            modes = resolveAvailableModes(
-                allowsQrScanning = entryPoint.allowsQrScanning,
-                extensionsAvailable = session.extensionsAvailable,
-            ),
-            currentMode = currentMode,
+    private fun buildTabs() {
+        val availableModes = resolveAvailableModes(
+            allowsQrScanning = entryPoint.allowsQrScanning,
+            extensionsAvailable = session.extensionsAvailable,
         )
-    }
 
-    private class Attachment(
-        val environment: CameraSessionEnvironment,
-        val chrome: ViewfinderChrome,
-        val session: CameraSession,
-        val emitEffect: (Effect) -> Unit,
-    )
+        stateHolder.update {
+            it.copy(session = it.session.copy(availableModes = availableModes))
+        }
+    }
 }

@@ -1,24 +1,25 @@
 package app.grapheneos.camera.ui.viewfinder.screen
 
+import android.os.Bundle
 import android.util.Log
-import androidx.camera.core.AspectRatio
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageCapture
-import androidx.camera.video.Quality
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.grapheneos.camera.R
 import app.grapheneos.camera.data.camera.model.BindOutcome
 import app.grapheneos.camera.data.camera.model.CameraSessionEvent
-import app.grapheneos.camera.data.camera.session.CameraSession
-import app.grapheneos.camera.data.camera.session.CameraSessionEnvironment
+import app.grapheneos.camera.data.camera.model.LensFacing
+import app.grapheneos.camera.data.core.model.AspectRatio
 import app.grapheneos.camera.data.core.model.CameraMode
+import app.grapheneos.camera.data.core.model.FlashMode
+import app.grapheneos.camera.data.core.model.VideoQuality
+import app.grapheneos.camera.data.location.repository.LocationRepository
 import app.grapheneos.camera.data.settings.model.ModeSlot
 import app.grapheneos.camera.di.core.ApplicationScope
 import app.grapheneos.camera.di.core.DefaultDispatcher
 import app.grapheneos.camera.di.core.MainImmediateDispatcher
-import app.grapheneos.camera.domain.camera.model.CameraEntryPoint
 import app.grapheneos.camera.domain.camera.usecase.ResolveDroppedVideoQuality
+import app.grapheneos.camera.domain.core.model.CameraEntryPoint
 import app.grapheneos.camera.domain.gallery.usecase.RevertToMediaStoreLocation
 import app.grapheneos.camera.ui.viewfinder.screen.delegate.ViewfinderCameraDelegate
 import app.grapheneos.camera.ui.viewfinder.screen.delegate.ViewfinderCaptureDelegate
@@ -34,10 +35,10 @@ import app.grapheneos.camera.ui.viewfinder.screen.model.ViewfinderAction.Setting
 import app.grapheneos.camera.ui.viewfinder.screen.model.ViewfinderScreenEffect as Effect
 import app.grapheneos.camera.ui.viewfinder.screen.model.ViewfinderState
 import app.grapheneos.camera.ui.viewfinder.screen.model.ViewfinderUiState
+import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
@@ -51,6 +52,7 @@ interface ViewfinderScreenModel {
     fun onAction(action: ViewfinderAction)
 }
 
+@HiltViewModel
 class ViewfinderViewModel @Inject constructor(
     private val entryPoint: CameraEntryPoint,
     private val settingsDelegate: ViewfinderSettingsDelegate,
@@ -59,6 +61,7 @@ class ViewfinderViewModel @Inject constructor(
     private val captureDelegate: ViewfinderCaptureDelegate,
     private val resolveDroppedVideoQuality: ResolveDroppedVideoQuality,
     private val revertToMediaStoreLocation: RevertToMediaStoreLocation,
+    private val locationRepository: LocationRepository,
     private val uiStateMapper: ViewfinderUiStateMapper,
     private val cameraBindSettingsMapper: CameraBindSettingsMapper,
     @ApplicationScope private val applicationScope: CoroutineScope,
@@ -80,111 +83,23 @@ class ViewfinderViewModel @Inject constructor(
     private val screenEffects = Channel<Effect>(capacity = Channel.BUFFERED)
     override val effects: Flow<Effect> = screenEffects.receiveAsFlow()
 
-    private var sessionEvents: Job? = null
-
     init {
         modeDelegate.bind(stateHolder)
-        cameraDelegate.bind(stateHolder)
+        cameraDelegate.bind(
+            scope = viewModelScope,
+            stateHolder = stateHolder,
+        )
         captureDelegate.bind(stateHolder)
         settingsDelegate.bind(
             scope = viewModelScope,
             stateHolder = stateHolder,
         )
-    }
 
-    fun attach(
-        environment: CameraSessionEnvironment,
-        chrome: ViewfinderChrome,
-        session: CameraSession,
-    ) {
-        cameraDelegate.attach(
-            environment = environment,
-            chrome = chrome,
-            session = session,
-            emitEffect = ::emitEffect,
-        )
-
-        sessionEvents?.cancel()
-        sessionEvents = viewModelScope.launch(mainDispatcher) {
+        viewModelScope.launch(mainDispatcher) {
             cameraDelegate.sessionEvents.collect { event ->
                 onSessionEvent(event)
             }
         }
-    }
-
-    fun detach() {
-        sessionEvents?.cancel()
-        sessionEvents = null
-
-        cameraDelegate.detach()
-        captureDelegate.detach()
-    }
-
-    private fun onSessionEvent(event: CameraSessionEvent) {
-        when (event) {
-            is CameraSessionEvent.ZoomStateChanged -> {
-                cameraDelegate.onZoomStateChanged()
-            }
-
-            is CameraSessionEvent.CameraProviderUnavailable -> {
-                emitEffect(Effect.ShowMessage(R.string.camera_provider_init_failure))
-            }
-
-            is CameraSessionEvent.ExtensionsUnavailable -> {
-                emitEffect(Effect.ShowMessage(R.string.extensions_manager_init_failure))
-            }
-
-            is CameraSessionEvent.ProviderReady -> {
-                startCamera(forced = event.forced)
-            }
-
-            is CameraSessionEvent.FeaturesSelected -> {
-                onFeaturesSelected(event)
-            }
-        }
-    }
-
-    private fun setFlashMode(value: Int) {
-        settingsDelegate.setFlashMode(value)
-        cameraDelegate.applyFlashMode(value)
-    }
-
-    private fun setRequireLocation(enabled: Boolean) {
-        when {
-            enabled -> emitEffect(Effect.StartLocationUpdates)
-            else -> emitEffect(Effect.StopLocationUpdates)
-        }
-
-        settingsDelegate.setGeoTagging(enabled)
-    }
-
-    private fun setSelfIllumination(enabled: Boolean) {
-        settingsDelegate.setSelfIllumination(enabled)
-
-        emitEffect(Effect.ApplySelfIllumination(state().selfIlluminate()))
-    }
-
-    private fun applyModeSettings() {
-        slotCurrentMode()
-
-        val slotted = state()
-
-        if (slotted.isVideoMode()) {
-            emitEffect(Effect.ReloadVideoQualities)
-        }
-
-        cameraDelegate.applyFlashMode(slotted.modeSettings.flashMode)
-
-        // A stored "on" is written before a permission request resolves, and it outlives a later
-        // revocation, so it cannot be asserted on its own: doing so opened a permission dialog on
-        // startup that the user never asked for. Coercing it here settles the stale value through
-        // the setter, and leaves every dialog in the app originating from an explicit toggle.
-        setRequireLocation(
-            enabled = slotted.modeSettings.geoTagging &&
-                !cameraDelegate.shouldAskForLocationPermission(),
-        )
-
-        setSelfIllumination(slotted.modeSettings.selfIllumination)
     }
 
     override fun onAction(action: ViewfinderAction) {
@@ -203,6 +118,23 @@ class ViewfinderViewModel @Inject constructor(
             is CameraAction.FlashToggleClicked -> toggleFlashMode()
             is CameraAction.TorchToggleClicked -> cameraDelegate.toggleTorch()
             is CameraAction.AspectRatioToggleClicked -> toggleAspectRatio()
+            is CameraAction.ZoomInKeyPressed -> cameraDelegate.stepZoom(ZOOM_KEY_STEP)
+            is CameraAction.ZoomOutKeyPressed -> cameraDelegate.stepZoom(-ZOOM_KEY_STEP)
+            is CameraAction.FocusKeyPressed -> cameraDelegate.cancelFocus()
+            is CameraAction.PreviewPinched -> cameraDelegate.scaleZoom(action.scaleFactor)
+            is CameraAction.ZoomSliderDragged -> cameraDelegate.setLinearZoom(action.linearZoom)
+
+            is CameraAction.ExposureSliderDragged -> {
+                cameraDelegate.setExposureCompensation(action.compensationIndex)
+            }
+
+            is CameraAction.PreviewTapped -> {
+                cameraDelegate.focusAt(
+                    x = action.x,
+                    y = action.y,
+                    autoCancelSeconds = state().settings.focusTimeoutSeconds,
+                )
+            }
         }
     }
 
@@ -221,14 +153,14 @@ class ViewfinderViewModel @Inject constructor(
 
     private fun onLifecycleAction(action: LifecycleAction) {
         when (action) {
+            is LifecycleAction.ScreenCreated -> onScreenCreated(action.host)
+            is LifecycleAction.ScreenDestroyed -> onScreenDestroyed()
             is LifecycleAction.PreviewStreamingStarted -> applyModeSettings()
             is LifecycleAction.CameraPermissionGranted -> initializeCamera(forced = false)
             is LifecycleAction.ScreenResumed -> initializeCamera(forced = true)
+            is LifecycleAction.RecordAudioPermissionGranted -> startCamera(forced = true)
             is LifecycleAction.CapturedPreviewDismissed -> dismissCapturedPreview()
-
-            is LifecycleAction.RecordAudioPermissionGranted,
-            is LifecycleAction.QrResultDismissed,
-            -> startCamera(forced = true)
+            is LifecycleAction.QrResultDismissed -> dismissQrResult()
         }
     }
 
@@ -236,7 +168,6 @@ class ViewfinderViewModel @Inject constructor(
         when (action) {
             is SettingsAction.ScanAllCodesToggleClicked -> {
                 settingsDelegate.toggleScanAllCodes()
-                cameraDelegate.refreshQrHints()
             }
 
             is SettingsAction.GridToggleClicked -> {
@@ -279,12 +210,38 @@ class ViewfinderViewModel @Inject constructor(
         }
     }
 
-    private fun onVideoQualitySelected(quality: Quality) {
-        if (quality == state().modeSettings.videoQuality) return
-
-        settingsDelegate.setVideoQuality(quality)
+    private fun switchMode(mode: CameraMode) {
+        if (!modeDelegate.select(mode)) return
 
         startCamera(forced = true)
+
+        // A mode can change with no touch involved, so the strip follows the camera and not the
+        // other way round - currentMode, because an extension that fails to bind falls back to
+        // another mode from inside startCamera(). Left until after that rebind, which blocks the
+        // main thread for long enough to swallow the animation whole.
+        if (entryPoint.showsCameraModeTabs) {
+            emitEffect(Effect.GoToModeTab(state().mode))
+        }
+    }
+
+    private fun switchLens() {
+        val lensFacing = cameraDelegate.lensFacing.opposite()
+        val isSwitched = cameraDelegate.switchLensFacing(
+            lensFacing = lensFacing,
+            extensionMode = state().mode.extensionMode,
+        )
+
+        when {
+            isSwitched -> startCamera(forced = true)
+            else -> emitEffect(Effect.ShowMessage(lensUnavailableMessage(lensFacing)))
+        }
+    }
+
+    private fun lensUnavailableMessage(lensFacing: LensFacing): Int {
+        return when (lensFacing) {
+            LensFacing.BACK -> R.string.rear_camera_unavailable
+            LensFacing.FRONT -> R.string.front_camera_unavailable
+        }
     }
 
     private fun toggleFlashMode() {
@@ -297,9 +254,9 @@ class ViewfinderViewModel @Inject constructor(
 
             currentState.session.isFlashAvailable -> {
                 val next = when (currentState.flashMode) {
-                    ImageCapture.FLASH_MODE_OFF -> ImageCapture.FLASH_MODE_ON
-                    ImageCapture.FLASH_MODE_ON -> ImageCapture.FLASH_MODE_AUTO
-                    else -> ImageCapture.FLASH_MODE_OFF
+                    FlashMode.OFF -> FlashMode.ON
+                    FlashMode.ON -> FlashMode.AUTO
+                    FlashMode.AUTO -> FlashMode.OFF
                 }
 
                 setFlashMode(next)
@@ -311,10 +268,15 @@ class ViewfinderViewModel @Inject constructor(
         }
     }
 
+    private fun setFlashMode(value: FlashMode) {
+        settingsDelegate.setFlashMode(value)
+        cameraDelegate.applyFlashMode(value)
+    }
+
     private fun toggleAspectRatio() {
         val next = when (state().aspectRatio()) {
             AspectRatio.RATIO_16_9 -> AspectRatio.RATIO_4_3
-            else -> AspectRatio.RATIO_16_9
+            AspectRatio.RATIO_4_3 -> AspectRatio.RATIO_16_9
         }
 
         settingsDelegate.setAspectRatio(next)
@@ -322,9 +284,122 @@ class ViewfinderViewModel @Inject constructor(
         startCamera(forced = true)
     }
 
-    private fun switchLens() {
-        if (cameraDelegate.toggleLensFacing(state().mode.extensionMode)) {
-            startCamera(forced = true)
+    private fun flashPreview() {
+        emitEffect(Effect.FlashPreview(state().selfIlluminate()))
+    }
+
+    private fun onStorageLocationNotFound() {
+        applicationScope.launch(defaultDispatcher) {
+            revertToMediaStoreLocation()
+            emitEffect(Effect.ShowStorageLocationNotFound)
+        }
+    }
+
+    private fun onScreenCreated(host: ViewfinderHost) {
+        cameraDelegate.onScreenCreated(host)
+    }
+
+    private fun onScreenDestroyed() {
+        cameraDelegate.onScreenDestroyed()
+        captureDelegate.onScreenDestroyed()
+    }
+
+    private fun applyModeSettings() {
+        slotCurrentMode()
+
+        val slotted = state()
+
+        if (slotted.isVideoMode()) {
+            cameraDelegate.refreshVideoQualities()
+        }
+
+        cameraDelegate.applyFlashMode(slotted.modeSettings.flashMode)
+
+        // A stored "on" is written before a permission request resolves, and it outlives a later
+        // revocation, so it cannot be asserted on its own: doing so opened a permission dialog on
+        // startup that the user never asked for. Coercing it here settles the stale value through
+        // the setter, and leaves every dialog in the app originating from an explicit toggle.
+        setRequireLocation(
+            enabled = slotted.modeSettings.geoTagging &&
+                !locationRepository.shouldAskForPermission(),
+        )
+
+        setSelfIllumination(slotted.modeSettings.selfIllumination)
+    }
+
+    private fun setRequireLocation(enabled: Boolean) {
+        when {
+            enabled -> emitEffect(Effect.StartLocationUpdates)
+            else -> emitEffect(Effect.StopLocationUpdates)
+        }
+
+        settingsDelegate.setGeoTagging(enabled)
+    }
+
+    private fun setSelfIllumination(enabled: Boolean) {
+        settingsDelegate.setSelfIllumination(enabled)
+
+        emitEffect(Effect.ApplySelfIllumination(state().selfIlluminate()))
+    }
+
+    private fun initializeCamera(forced: Boolean) {
+        when {
+            cameraDelegate.isProviderReady -> startCamera(forced = forced)
+            else -> cameraDelegate.initialize(
+                forced = forced,
+                extensionMode = state().mode.extensionMode,
+            )
+        }
+    }
+
+    private fun dismissCapturedPreview() {
+        captureDelegate.dismissCapturedPreview()
+
+        startCamera(forced = true)
+    }
+
+    private fun dismissQrResult() {
+        cameraDelegate.dismissQrResult()
+
+        startCamera(forced = true)
+    }
+
+    private fun onVideoQualitySelected(quality: VideoQuality) {
+        if (quality == state().modeSettings.videoQuality) return
+
+        settingsDelegate.setVideoQuality(quality)
+
+        startCamera(forced = true)
+    }
+
+    private fun onSessionEvent(event: CameraSessionEvent) {
+        when (event) {
+            is CameraSessionEvent.ZoomStateChanged -> {
+                cameraDelegate.onZoomStateChanged()
+                emitEffect(Effect.ShowZoomPanel)
+            }
+
+            is CameraSessionEvent.CameraProviderUnavailable -> {
+                emitEffect(Effect.ShowMessage(R.string.camera_provider_init_failure))
+            }
+
+            is CameraSessionEvent.ExtensionsUnavailable -> {
+                emitEffect(Effect.ShowMessage(R.string.extensions_manager_init_failure))
+            }
+
+            is CameraSessionEvent.ProviderReady -> {
+                startCamera(forced = event.forced)
+            }
+
+            is CameraSessionEvent.QrCodeScanned -> {
+                if (cameraDelegate.showQrResult()) {
+                    emitEffect(Effect.ShowQrResult(event.text))
+                }
+            }
+
+            is CameraSessionEvent.FeaturesSelected -> {
+                onFeaturesSelected(event)
+            }
         }
     }
 
@@ -343,18 +418,10 @@ class ViewfinderViewModel @Inject constructor(
         emitEffect(Effect.ShowVideoQualityUnsupported(droppedQuality))
     }
 
-    private fun initializeCamera(forced: Boolean) {
-        when {
-            cameraDelegate.isProviderReady -> startCamera(forced = forced)
-            else -> cameraDelegate.initialize(
-                forced = forced,
-                extensionMode = state().mode.extensionMode,
-            )
-        }
-    }
-
     private fun startCamera(forced: Boolean) {
         if (!cameraDelegate.beginBind(forced)) return
+
+        emitEffect(Effect.HideExposurePanel)
 
         slotCurrentMode()
 
@@ -368,6 +435,10 @@ class ViewfinderViewModel @Inject constructor(
             isQrMode = bindState.isQrMode(),
             extensionMode = bindState.mode.extensionMode,
         ) ?: return
+
+        if (target.qrLensFacing == LensFacing.FRONT) {
+            emitEffect(Effect.ShowMessage(R.string.qr_rear_camera_unavailable))
+        }
 
         val outcome = cameraDelegate.bindCamera(
             cameraBindSettingsMapper.map(
@@ -400,68 +471,67 @@ class ViewfinderViewModel @Inject constructor(
             }
 
             BindOutcome.BOUND -> {
-                val boundState = state()
-
-                cameraDelegate.announceBind(
-                    aspectRatio = boundState.aspectRatio(),
-                    isInPhotoMode = boundState.isInPhotoMode(),
-                    currentMode = { state().mode },
-                )
+                cameraDelegate.announceBind()
+                emitEffect(Effect.HideZoomPanel)
             }
         }
-    }
-
-    private fun onStorageLocationNotFound() {
-        applicationScope.launch(defaultDispatcher) {
-            revertToMediaStoreLocation()
-            emitEffect(Effect.ShowStorageLocationNotFound)
-        }
-    }
-
-    private fun dismissCapturedPreview() {
-        captureDelegate.dismissCapturedPreview()
-
-        startCamera(forced = true)
-    }
-
-    private fun flashPreview() {
-        emitEffect(Effect.FlashPreview(state().selfIlluminate()))
-    }
-
-    private fun switchMode(mode: CameraMode) {
-        if (!modeDelegate.select(mode)) return
-
-        cameraDelegate.cancelFocusTimer()
-
-        startCamera(forced = true)
-
-        // A mode can change with no touch involved, so the strip follows the camera and not the
-        // other way round - currentMode, because an extension that fails to bind falls back to
-        // another mode from inside startCamera(). Left until after that rebind, which blocks the
-        // main thread for long enough to swallow the animation whole.
-        if (entryPoint.showsCameraModeTabs) {
-            emitEffect(Effect.GoToModeTab(state().mode))
-        }
-    }
-
-    private fun emitEffect(effect: Effect) {
-        screenEffects.trySend(effect)
     }
 
     private fun slotCurrentMode() {
         settingsDelegate.selectModeSlot(
             ModeSlot(
                 mode = state().mode,
-                isFrontFacing = cameraDelegate.lensFacing == CameraSelector.LENS_FACING_FRONT,
+                isFrontFacing = cameraDelegate.lensFacing == LensFacing.FRONT,
             ),
         )
+    }
+
+    private fun emitEffect(effect: Effect) {
+        screenEffects.trySend(effect)
     }
 
     private fun state(): ViewfinderState {
         return stateHolder.state.value
     }
 
-    private companion object {
-        const val TAG = "ViewfinderViewModel"
+    companion object {
+        private const val TAG = "ViewfinderViewModel"
+
+        private const val ZOOM_KEY_STEP = 1f
+
+        private const val IS_SECURE_SESSION = "entry_point_is_secure_session"
+        private const val IS_CAPTURE_SESSION = "entry_point_is_capture_session"
+        private const val IS_VIDEO_ONLY_SESSION = "entry_point_is_video_only_session"
+        private const val REQUIRES_VIDEO_MODE_ONLY = "entry_point_requires_video_mode_only"
+        private const val ALLOWS_QR_SCANNING = "entry_point_allows_qr_scanning"
+        private const val SHOWS_CAMERA_MODE_TABS = "entry_point_shows_camera_mode_tabs"
+
+        fun arguments(entryPoint: CameraEntryPoint): Bundle {
+            return Bundle().apply {
+                putBoolean(IS_SECURE_SESSION, entryPoint.isSecureSession)
+                putBoolean(IS_CAPTURE_SESSION, entryPoint.isCaptureSession)
+                putBoolean(IS_VIDEO_ONLY_SESSION, entryPoint.isVideoOnlySession)
+                putBoolean(REQUIRES_VIDEO_MODE_ONLY, entryPoint.requiresVideoModeOnly)
+                putBoolean(ALLOWS_QR_SCANNING, entryPoint.allowsQrScanning)
+                putBoolean(SHOWS_CAMERA_MODE_TABS, entryPoint.showsCameraModeTabs)
+            }
+        }
+
+        fun entryPoint(arguments: SavedStateHandle): CameraEntryPoint {
+            return CameraEntryPoint(
+                isSecureSession = arguments.requireFlag(IS_SECURE_SESSION),
+                isCaptureSession = arguments.requireFlag(IS_CAPTURE_SESSION),
+                isVideoOnlySession = arguments.requireFlag(IS_VIDEO_ONLY_SESSION),
+                requiresVideoModeOnly = arguments.requireFlag(REQUIRES_VIDEO_MODE_ONLY),
+                allowsQrScanning = arguments.requireFlag(ALLOWS_QR_SCANNING),
+                showsCameraModeTabs = arguments.requireFlag(SHOWS_CAMERA_MODE_TABS),
+            )
+        }
+
+        private fun SavedStateHandle.requireFlag(key: String): Boolean {
+            return requireNotNull(get<Boolean>(key)) {
+                "The ViewModel was created without its entry point ($key)"
+            }
+        }
     }
 }
