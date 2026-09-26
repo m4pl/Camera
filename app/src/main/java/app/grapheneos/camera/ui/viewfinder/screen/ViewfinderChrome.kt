@@ -1,44 +1,38 @@
 package app.grapheneos.camera.ui.viewfinder.screen
 
-import androidx.camera.core.CameraInfo
-import androidx.camera.core.ExposureState
-import app.grapheneos.camera.data.core.model.CameraMode
+import android.net.Uri
+import app.grapheneos.camera.ui.activities.CaptureActivity
+import app.grapheneos.camera.ui.activities.MainActivity
+import app.grapheneos.camera.ui.viewfinder.screen.model.ThumbnailSize
 
 interface ViewfinderChrome {
 
-    fun applyModeChrome(mode: CameraMode, isVideoMode: Boolean, scanAllCodes: Boolean)
+    fun thumbnailSize(): ThumbnailSize
 
-    fun applyScanAllCodesChrome(scanAllCodes: Boolean)
+    /** The file another app asked this session to write its capture into, if it named one. */
+    fun foreignOutputUri(): Uri?
 
-    fun setCameraModeTabs(modes: Set<CameraMode>, currentMode: CameraMode)
+    fun forceUpdateOrientationSensor()
+}
 
-    fun goToModeTab(mode: CameraMode)
+internal class ViewfinderChromeImpl(
+    private val activity: MainActivity,
+) : ViewfinderChrome {
 
-    fun onPreviewBound(aspectRatio: Int, cameraInfo: CameraInfo)
+    override fun thumbnailSize(): ThumbnailSize {
+        return ThumbnailSize(
+            width = activity.imagePreview.width,
+            height = activity.imagePreview.height,
+        )
+    }
 
-    fun updateZoomThumb(shouldShowPanel: Boolean)
+    override fun foreignOutputUri(): Uri? {
+        return (activity as? CaptureActivity)
+            ?.takeIf { it.isOutputUriAvailable() }
+            ?.outputUri
+    }
 
-    fun applyExposureState(exposureState: ExposureState)
-
-    fun hideExposurePanel()
-
-    fun setMicMutedIconVisible(visible: Boolean)
-
-    fun updateGyroscopeIndicator(inPhotoMode: Boolean)
-
-    fun onFlashModeChanged()
-
-    fun onIncludeAudioChanged(enabled: Boolean)
-
-    fun onGeoTaggingChanged(enabled: Boolean)
-
-    fun onSelfIlluminationChanged(enabled: Boolean)
-
-    fun onRequireLocationChanged(required: Boolean)
-
-    fun reloadVideoQualities()
-
-    fun showOnlyRelevantSettings()
-
-    fun resetTorchToggle()
+    override fun forceUpdateOrientationSensor() {
+        activity.forceUpdateOrientationSensor()
+    }
 }

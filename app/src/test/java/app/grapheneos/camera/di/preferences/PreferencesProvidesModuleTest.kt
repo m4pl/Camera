@@ -4,14 +4,18 @@ import android.app.Activity
 import androidx.datastore.core.DataStore
 import app.grapheneos.camera.data.core.store.InMemoryDataStore
 import app.grapheneos.camera.data.media.store.StoragePrefs
-import app.grapheneos.camera.data.settings.store.SettingsPrefs
-import app.grapheneos.camera.data.settings.store.StoredCameraSettings
+import app.grapheneos.camera.data.settings.repository.SettingsRepository
 import app.grapheneos.camera.ui.activities.MoreSettings
 import app.grapheneos.camera.ui.activities.MoreSettingsSecure
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.verify
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -24,16 +28,70 @@ class PreferencesProvidesModuleTest {
 
     private val secureSession = SecureSessionPreferences()
 
-    private val durableSettings: DataStore<SettingsPrefs> = InMemoryDataStore(
-        SettingsPrefs(common = StoredCameraSettings(photoQuality = OWNERS_PHOTO_QUALITY)),
-    )
+    private val owners = mockk<SettingsRepository> {
+        every { sessionCopy() } answers { mockk() }
+    }
 
     private val durableStorage: DataStore<StoragePrefs> = InMemoryDataStore(StoragePrefs())
 
-    private fun <T : Activity> settingsPrefsFor(type: Class<T>): DataStore<SettingsPrefs> {
-        return module.provideSettingsPrefs(
+    @Test
+    fun settingsRepository_secureActivity_isACopyOfTheOwners() {
+        runTest {
+            val session = settingsRepositoryFor(MoreSettingsSecure::class.java)
+
+            assertNotSame(owners, session)
+            verify(exactly = 1) { owners.sessionCopy() }
+        }
+    }
+
+    @Test
+    fun settingsRepository_regularActivity_isTheOwners() {
+        runTest {
+            val session = settingsRepositoryFor(MoreSettings::class.java)
+
+            assertSame(owners, session)
+            verify(exactly = 0) { owners.sessionCopy() }
+        }
+    }
+
+    @Test
+    fun storagePrefs_secureActivity_keepsWritesOutOfTheOwnersStore() {
+        runTest {
+            val session = storagePrefsFor(MoreSettingsSecure::class.java)
+
+            session.updateData { it.copy(storageLocation = SESSIONS_LOCATION) }
+
+            assertEquals(SESSIONS_LOCATION, stored(session).storageLocation)
+            assertNull(stored(durableStorage).storageLocation)
+        }
+    }
+
+    @Test
+    fun storagePrefs_secureActivity_doesNotFollowTheOwnersLaterChanges() {
+        runTest {
+            val session = storagePrefsFor(MoreSettingsSecure::class.java)
+
+            durableStorage.updateData { it.copy(storageLocation = OWNERS_LOCATION) }
+
+            assertNull(stored(session).storageLocation)
+        }
+    }
+
+    @Test
+    fun storagePrefs_regularActivity_writesTheOwnersStore() {
+        runTest {
+            val session = storagePrefsFor(MoreSettings::class.java)
+
+            session.updateData { it.copy(storageLocation = OWNERS_LOCATION) }
+
+            assertEquals(OWNERS_LOCATION, stored(durableStorage).storageLocation)
+        }
+    }
+
+    private fun <T : Activity> settingsRepositoryFor(type: Class<T>): SettingsRepository {
+        return module.provideSettingsRepository(
             context = Robolectric.buildActivity(type).get(),
-            durable = durableSettings,
+            owners = owners,
             secureSession = secureSession,
         )
     }
@@ -46,88 +104,11 @@ class PreferencesProvidesModuleTest {
         )
     }
 
-    private fun <T> stored(from: DataStore<T>): T {
-        return runBlocking { from.data.first() }
-    }
-
-    @Test
-    fun settingsPrefs_secureActivity_keepsWritesOutOfTheOwnersStore() {
-        val session = settingsPrefsFor(MoreSettingsSecure::class.java)
-
-        runBlocking {
-            session.updateData {
-                it.copy(common = it.common.copy(photoQuality = SESSIONS_PHOTO_QUALITY))
-            }
-        }
-
-        assertEquals(SESSIONS_PHOTO_QUALITY, stored(session).common.photoQuality)
-        assertEquals(OWNERS_PHOTO_QUALITY, stored(durableSettings).common.photoQuality)
-    }
-
-    @Test
-    fun settingsPrefs_secureActivity_startsFromWhatTheOwnerConfigured() {
-        val session = settingsPrefsFor(MoreSettingsSecure::class.java)
-
-        assertEquals(OWNERS_PHOTO_QUALITY, stored(session).common.photoQuality)
-    }
-
-    @Test
-    fun settingsPrefs_secureActivity_doesNotFollowTheOwnersLaterChanges() {
-        val session = settingsPrefsFor(MoreSettingsSecure::class.java)
-
-        runBlocking {
-            durableSettings.updateData {
-                it.copy(common = it.common.copy(photoQuality = SESSIONS_PHOTO_QUALITY))
-            }
-        }
-
-        assertEquals(OWNERS_PHOTO_QUALITY, stored(session).common.photoQuality)
-    }
-
-    @Test
-    fun settingsPrefs_regularActivity_writesTheOwnersStore() {
-        val session = settingsPrefsFor(MoreSettings::class.java)
-
-        runBlocking {
-            session.updateData {
-                it.copy(common = it.common.copy(photoQuality = SESSIONS_PHOTO_QUALITY))
-            }
-        }
-
-        assertEquals(SESSIONS_PHOTO_QUALITY, stored(durableSettings).common.photoQuality)
-    }
-
-    @Test
-    fun storagePrefs_secureActivity_keepsWritesOutOfTheOwnersStore() {
-        val session = storagePrefsFor(MoreSettingsSecure::class.java)
-
-        runBlocking { session.updateData { it.copy(storageLocation = SESSIONS_LOCATION) } }
-
-        assertEquals(SESSIONS_LOCATION, stored(session).storageLocation)
-        assertNull(stored(durableStorage).storageLocation)
-    }
-
-    @Test
-    fun storagePrefs_secureActivity_doesNotFollowTheOwnersLaterChanges() {
-        val session = storagePrefsFor(MoreSettingsSecure::class.java)
-
-        runBlocking { durableStorage.updateData { it.copy(storageLocation = OWNERS_LOCATION) } }
-
-        assertNull(stored(session).storageLocation)
-    }
-
-    @Test
-    fun storagePrefs_regularActivity_writesTheOwnersStore() {
-        val session = storagePrefsFor(MoreSettings::class.java)
-
-        runBlocking { session.updateData { it.copy(storageLocation = OWNERS_LOCATION) } }
-
-        assertEquals(OWNERS_LOCATION, stored(durableStorage).storageLocation)
+    private suspend fun <T> stored(from: DataStore<T>): T {
+        return from.data.first()
     }
 
     private companion object {
-        const val OWNERS_PHOTO_QUALITY = 71
-        const val SESSIONS_PHOTO_QUALITY = 42
         const val OWNERS_LOCATION = "content://tree/owners"
         const val SESSIONS_LOCATION = "content://tree/sessions"
     }
