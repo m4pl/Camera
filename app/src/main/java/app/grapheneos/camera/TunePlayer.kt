@@ -4,8 +4,7 @@ import android.content.Context
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Handler
-import android.os.SystemClock
-import app.grapheneos.camera.ui.activities.MainActivity
+import android.os.Looper
 
 private fun prepareMediaPlayer(context: Context, resid: Int, listener: MediaPlayer.OnPreparedListener) {
     MediaPlayer().apply {
@@ -15,7 +14,12 @@ private fun prepareMediaPlayer(context: Context, resid: Int, listener: MediaPlay
     }
 }
 
-open class TunePlayer(val context: MainActivity) {
+open class TunePlayer(
+    context: Context,
+    private val soundsEnabled: () -> Boolean,
+) {
+
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private lateinit var shutterPlayer: MediaPlayer
 
@@ -25,7 +29,6 @@ open class TunePlayer(val context: MainActivity) {
     private lateinit var tCPlayer: MediaPlayer
 
     private lateinit var vRecPlayer: MediaPlayer
-    private lateinit var vStopPlayer: MediaPlayer
 
     init {
         prepareMediaPlayer(context, R.raw.image_shot, { player -> shutterPlayer = player })
@@ -36,11 +39,10 @@ open class TunePlayer(val context: MainActivity) {
         prepareMediaPlayer(context, R.raw.timer_final_second, { player -> tCPlayer = player })
 
         prepareMediaPlayer(context, R.raw.video_start, { player -> vRecPlayer = player })
-        prepareMediaPlayer(context, R.raw.video_stop, { player -> vStopPlayer = player })
     }
 
     private fun shouldNotPlayTune(): Boolean {
-        return !context.viewfinder.enableCameraSounds
+        return !soundsEnabled()
     }
 
     fun playShutterSound() {
@@ -49,7 +51,7 @@ open class TunePlayer(val context: MainActivity) {
         shutterPlayer.start()
     }
 
-    open fun playVRStartSound(handler: Handler, onPlayed: Runnable) {
+    open fun playVRStartSound(onPlayed: Runnable) {
         if (shouldNotPlayTune() || !::vRecPlayer.isInitialized) {
             onPlayed.run()
             return
@@ -62,7 +64,7 @@ open class TunePlayer(val context: MainActivity) {
                 delivered = true
                 vRecPlayer.setOnCompletionListener(null)
                 vRecPlayer.setOnErrorListener(null)
-                handler.postDelayed(onPlayed, 10)
+                mainHandler.postDelayed(onPlayed, SOUND_TO_START_DELAY_MS)
             }
         }
         vRecPlayer.setOnCompletionListener(deliverOnce)
@@ -72,12 +74,6 @@ open class TunePlayer(val context: MainActivity) {
         }
         vRecPlayer.seekTo(0)
         vRecPlayer.start()
-    }
-
-    fun playVRStopSound() {
-        if (shouldNotPlayTune() || !::vStopPlayer.isInitialized) return
-        vStopPlayer.seekTo(0)
-        vStopPlayer.start()
     }
 
     fun playTimerIncrementSound() {
@@ -96,5 +92,9 @@ open class TunePlayer(val context: MainActivity) {
         if (shouldNotPlayTune() || !::fSPlayer.isInitialized) return
         fSPlayer.seekTo(0)
         fSPlayer.start()
+    }
+
+    private companion object {
+        private const val SOUND_TO_START_DELAY_MS = 10L
     }
 }

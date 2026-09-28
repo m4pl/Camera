@@ -1,19 +1,25 @@
 package app.grapheneos.camera.di.camera
 
+import app.grapheneos.camera.data.camera.mapper.CameraXConstantsMapper
+import app.grapheneos.camera.data.camera.mapper.CameraXConstantsMapperImpl
+import app.grapheneos.camera.data.camera.mapper.CameraXStateMapper
+import app.grapheneos.camera.data.camera.mapper.CameraXStateMapperImpl
+import app.grapheneos.camera.data.camera.mapper.RecordingEventMapper
+import app.grapheneos.camera.data.camera.mapper.RecordingEventMapperImpl
 import app.grapheneos.camera.data.camera.mapper.VideoQualityFeatureMapper
 import app.grapheneos.camera.data.camera.mapper.VideoQualityFeatureMapperImpl
 import app.grapheneos.camera.data.camera.repository.CameraProviderSource
 import app.grapheneos.camera.data.camera.repository.CameraProviderSourceImpl
 import app.grapheneos.camera.data.camera.repository.ExtensionAvailabilityRepository
 import app.grapheneos.camera.data.camera.repository.ExtensionAvailabilityRepositoryImpl
-import app.grapheneos.camera.data.camera.session.CameraSessionFactory
-import app.grapheneos.camera.data.camera.session.CameraSessionFactoryImpl
 import app.grapheneos.camera.data.camera.session.CameraSessionPlanFactory
 import app.grapheneos.camera.data.camera.session.CameraSessionPlanFactoryImpl
 import app.grapheneos.camera.data.camera.session.FeatureCombinationSupport
 import app.grapheneos.camera.data.camera.session.FeatureCombinationSupportImpl
 import app.grapheneos.camera.data.camera.session.InVideoSnapshotSupportResolver
 import app.grapheneos.camera.data.camera.session.InVideoSnapshotSupportResolverImpl
+import app.grapheneos.camera.data.camera.session.JpegExtractor
+import app.grapheneos.camera.data.camera.session.JpegExtractorImpl
 import app.grapheneos.camera.data.camera.session.SnapshotProbeCache
 import app.grapheneos.camera.data.camera.session.SnapshotProbeCacheImpl
 import app.grapheneos.camera.domain.camera.usecase.ResolveAvailableModes
@@ -49,6 +55,24 @@ internal abstract class CameraBindsModule {
 
     @Binds
     @Reusable
+    abstract fun bindCameraXConstantsMapper(
+        impl: CameraXConstantsMapperImpl,
+    ): CameraXConstantsMapper
+
+    @Binds
+    @Reusable
+    abstract fun bindCameraXStateMapper(
+        impl: CameraXStateMapperImpl,
+    ): CameraXStateMapper
+
+    @Binds
+    @Reusable
+    abstract fun bindRecordingEventMapper(
+        impl: RecordingEventMapperImpl,
+    ): RecordingEventMapper
+
+    @Binds
+    @Reusable
     abstract fun bindVideoQualityFeatureMapper(
         impl: VideoQualityFeatureMapperImpl,
     ): VideoQualityFeatureMapper
@@ -72,14 +96,14 @@ internal abstract class CameraBindsModule {
     ): InVideoSnapshotSupportResolver
 
     @Binds
+    @Reusable
+    abstract fun bindJpegExtractor(
+        impl: JpegExtractorImpl,
+    ): JpegExtractor
+
+    @Binds
     @Singleton
     abstract fun bindSnapshotProbeCache(
         impl: SnapshotProbeCacheImpl,
     ): SnapshotProbeCache
-
-    @Binds
-    @Reusable
-    abstract fun bindCameraSessionFactory(
-        impl: CameraSessionFactoryImpl,
-    ): CameraSessionFactory
 }

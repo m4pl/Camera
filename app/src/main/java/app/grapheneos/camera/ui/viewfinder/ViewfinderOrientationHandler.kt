@@ -65,7 +65,7 @@ internal class ViewfinderOrientationHandler(
         activity.session.videoCapture?.targetRotation = targetRotation
         activity.session.iAnalyzer?.targetRotation = targetRotation
 
-        if (activity.videoCapturer.isRecording) return
+        if (activity.viewfinder.uiState.value.isRecordingActive) return
 
         var iconRotation = (360f - ((orientation - activity.getRotation() + 360) % 360)) % 360
 
@@ -113,9 +113,7 @@ internal class ViewfinderOrientationHandler(
         zDegrees: Float,
     ) {
         // If we are in photo mode and the countdown timer isn't running
-        if (activity.viewfinder.isQRMode || activity.viewfinder.isVideoMode ||
-            activity.cdTimer.isRunning
-        ) {
+        if (!activity.viewfinder.uiState.value.inPhotoMode || activity.cdTimer.isRunning) {
             return
         }
 

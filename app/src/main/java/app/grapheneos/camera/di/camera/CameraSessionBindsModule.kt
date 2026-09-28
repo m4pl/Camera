@@ -1,20 +1,20 @@
 package app.grapheneos.camera.di.camera
 
-import app.grapheneos.camera.domain.camera.usecase.ResolveDroppedVideoQuality
-import app.grapheneos.camera.domain.camera.usecase.ResolveDroppedVideoQualityImpl
+import app.grapheneos.camera.data.camera.session.VideoRecordingSession
+import app.grapheneos.camera.data.camera.session.VideoRecordingSessionImpl
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
-import dagger.hilt.android.components.ActivityComponent
-import dagger.hilt.android.scopes.ActivityScoped
+import dagger.hilt.android.components.ActivityRetainedComponent
+import dagger.hilt.android.scopes.ActivityRetainedScoped
 
 @Module
-@InstallIn(ActivityComponent::class)
+@InstallIn(ActivityRetainedComponent::class)
 internal abstract class CameraSessionBindsModule {
 
     @Binds
-    @ActivityScoped
-    abstract fun bindResolveDroppedVideoQuality(
-        impl: ResolveDroppedVideoQualityImpl,
-    ): ResolveDroppedVideoQuality
+    @ActivityRetainedScoped
+    abstract fun bindVideoRecordingSession(
+        impl: VideoRecordingSessionImpl,
+    ): VideoRecordingSession
 }

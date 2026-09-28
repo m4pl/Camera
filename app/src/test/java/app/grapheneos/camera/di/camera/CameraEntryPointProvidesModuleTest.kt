@@ -1,7 +1,7 @@
 package app.grapheneos.camera.di.camera
 
 import android.app.Activity
-import app.grapheneos.camera.domain.camera.model.CameraEntryPoint
+import app.grapheneos.camera.domain.core.model.CameraEntryPoint
 import app.grapheneos.camera.ui.activities.CaptureActivity
 import app.grapheneos.camera.ui.activities.MainActivity
 import app.grapheneos.camera.ui.activities.QrTile
@@ -21,10 +21,6 @@ import org.robolectric.RobolectricTestRunner
 class CameraEntryPointProvidesModuleTest {
 
     private val module = CameraEntryPointProvidesModule()
-
-    private fun <T : Activity> entryPointFor(type: Class<T>): CameraEntryPoint {
-        return module.provideCameraEntryPoint(Robolectric.buildActivity(type).get())
-    }
 
     @Test
     fun theMainEntryPoint_offersEverything() {
@@ -87,5 +83,9 @@ class CameraEntryPointProvidesModuleTest {
         assertTrue(entryPoint.isVideoOnlySession)
         assertTrue(entryPoint.requiresVideoModeOnly)
         assertFalse(entryPoint.showsCameraModeTabs)
+    }
+
+    private fun <T : Activity> entryPointFor(type: Class<T>): CameraEntryPoint {
+        return module.provideCameraEntryPoint(Robolectric.buildActivity(type).get())
     }
 }
