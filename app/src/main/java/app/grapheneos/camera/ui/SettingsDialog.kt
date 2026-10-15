@@ -11,7 +11,6 @@ import android.graphics.Color
 import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -25,7 +24,6 @@ import android.widget.ArrayAdapter
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.ToggleButton
@@ -41,14 +39,13 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.ColorUtils
 import androidx.core.view.ViewCompat
-import app.grapheneos.camera.CamConfig
 import app.grapheneos.camera.R
+import app.grapheneos.camera.data.settings.model.GridType
 import app.grapheneos.camera.databinding.SettingsBinding
 import app.grapheneos.camera.ui.activities.MainActivity
 import app.grapheneos.camera.ui.activities.MoreSettings
 import com.google.android.material.color.MaterialColors
 import com.google.android.material.materialswitch.MaterialSwitch
-import com.google.android.material.radiobutton.MaterialRadioButton
 import java.util.Collections
 import kotlin.math.max
 
@@ -65,7 +62,9 @@ class SettingsDialog(val mActivity: MainActivity, themedContext: Context) :
     var torchToggle: ToggleButton
     private var gridToggle: ImageView
     var videoQualitySpinner: Spinner
-    private lateinit var vQAdapter: ArrayAdapter<String>
+    internal var videoQualities: List<Quality> = emptyList()
+        private set
+
     private var focusTimeoutSpinner: Spinner
     private var timerSpinner: Spinner
 
@@ -219,10 +218,10 @@ class SettingsDialog(val mActivity: MainActivity, themedContext: Context) :
         gridToggle = binding.gridToggleOption
         gridToggle.setOnClickListener {
             camConfig.gridType = when (camConfig.gridType) {
-                CamConfig.GridType.NONE -> CamConfig.GridType.THREE_BY_THREE
-                CamConfig.GridType.THREE_BY_THREE -> CamConfig.GridType.FOUR_BY_FOUR
-                CamConfig.GridType.FOUR_BY_FOUR -> CamConfig.GridType.GOLDEN_RATIO
-                CamConfig.GridType.GOLDEN_RATIO -> CamConfig.GridType.NONE
+                GridType.NONE -> GridType.THREE_BY_THREE
+                GridType.THREE_BY_THREE -> GridType.FOUR_BY_FOUR
+                GridType.FOUR_BY_FOUR -> GridType.GOLDEN_RATIO
+                GridType.GOLDEN_RATIO -> GridType.NONE
             }
             updateGridToggleUI()
         }
@@ -237,9 +236,9 @@ class SettingsDialog(val mActivity: MainActivity, themedContext: Context) :
                     position: Int,
                     p3: Long
                 ) {
+                    val quality = videoQualities.getOrNull(position) ?: return
 
-                    val choice = vQAdapter.getItem(position) as String
-                    updateVideoQuality(choice)
+                    updateVideoQuality(quality)
                 }
 
                 override fun onNothingSelected(p0: AdapterView<*>?) {}
@@ -550,18 +549,13 @@ class SettingsDialog(val mActivity: MainActivity, themedContext: Context) :
     private fun updateTimerDuration(duration: Int) {
         mActivity.timerDuration = duration
         mActivity.updateSelfTimerBadge()
-        // commonPref rather than modePref: the self-timer is not per-mode, and modePref is not
-        // assigned until the camera starts, which happens after this dialog is built.
-        camConfig.commonPref.edit()
-            .putInt(CamConfig.SettingValues.Key.SELF_TIMER_DURATION, duration)
-            .apply()
+        // Common rather than per-mode: a mode's preferences are not slotted until the camera
+        // starts, which happens after this dialog is built.
+        camConfig.selfTimerDuration = duration
     }
 
     private fun restoreTimerDuration() {
-        val duration = camConfig.commonPref.getInt(
-            CamConfig.SettingValues.Key.SELF_TIMER_DURATION,
-            CamConfig.SettingValues.Default.SELF_TIMER_DURATION
-        )
+        val duration = camConfig.selfTimerDuration
         // Apply directly: Spinner.setSelection() only posts its selection callback, so the duration
         // would otherwise stay unset for a looper pass.
         updateTimerDuration(duration)
@@ -570,10 +564,7 @@ class SettingsDialog(val mActivity: MainActivity, themedContext: Context) :
         timerSpinner.setSelection(timeOptions.indexOf(option).coerceAtLeast(0), false)
     }
 
-    fun updateVideoQuality(choice: String, resCam: Boolean = true) {
-
-        val quality = titleToQuality(choice)
-
+    fun updateVideoQuality(quality: Quality, resCam: Boolean = true) {
         if (quality == camConfig.videoQuality) return
 
         camConfig.videoQuality = quality
@@ -581,21 +572,7 @@ class SettingsDialog(val mActivity: MainActivity, themedContext: Context) :
         if (resCam) {
             camConfig.startCamera(true)
         } else {
-            videoQualitySpinner.setSelection(getAvailableQTitles().indexOf(choice))
-
-        }
-    }
-
-    fun titleToQuality(title: String): Quality {
-        return when (title) {
-            "2160p (UHD)" -> Quality.UHD
-            "1080p (FHD)" -> Quality.FHD
-            "720p (HD)" -> Quality.HD
-            "480p (SD)" -> Quality.SD
-            else -> {
-                Log.e("TAG", "Unknown quality: $title")
-                Quality.SD
-            }
+            videoQualitySpinner.setSelection(videoQualities.indexOf(quality))
         }
     }
 
@@ -785,38 +762,15 @@ class SettingsDialog(val mActivity: MainActivity, themedContext: Context) :
         return Recorder.getVideoCapabilities(cameraInfo).getSupportedQualities(DynamicRange.SDR)
     }
 
-    private fun getAvailableQTitles(): List<String> {
-        val titles = arrayListOf<String>()
-
-        getAvailableQualities().forEach {
-            titles.add(getTitleFor(it))
-        }
-
-        return titles
-    }
-
-    private fun getTitleFor(quality: Quality): String {
-        return when (quality) {
-            Quality.UHD -> "2160p (UHD)"
-            Quality.FHD -> "1080p (FHD)"
-            Quality.HD -> "720p (HD)"
-            Quality.SD -> "480p (SD)"
-            else -> {
-                Log.i("TAG", "Unknown constant: $quality")
-                "Unknown"
-            }
-        }
-    }
-
     fun updateGridToggleUI() {
         mActivity.previewGrid.postInvalidate()
         // The description has to travel with the drawable: this control cycles through four
         // states, so a fixed "Grid Toggle" label left a screen reader unable to report any of them
         val (icon, description) = when (camConfig.gridType) {
-            CamConfig.GridType.NONE -> R.drawable.grid_off_circle to R.string.grid_off
-            CamConfig.GridType.THREE_BY_THREE -> R.drawable.grid_3x3_circle to R.string.grid_3x3
-            CamConfig.GridType.FOUR_BY_FOUR -> R.drawable.grid_4x4_circle to R.string.grid_4x4
-            CamConfig.GridType.GOLDEN_RATIO ->
+            GridType.NONE -> R.drawable.grid_off_circle to R.string.grid_off
+            GridType.THREE_BY_THREE -> R.drawable.grid_3x3_circle to R.string.grid_3x3
+            GridType.FOUR_BY_FOUR -> R.drawable.grid_4x4_circle to R.string.grid_4x4
+            GridType.GOLDEN_RATIO ->
                 R.drawable.grid_goldenratio_circle to R.string.grid_golden_ratio
         }
         gridToggle.setImageResource(icon)
@@ -876,23 +830,22 @@ class SettingsDialog(val mActivity: MainActivity, themedContext: Context) :
     }
 
     fun reloadQualities() {
+        videoQualities = getAvailableQualities()
 
-        val titles = getAvailableQTitles()
-
-        vQAdapter = ArrayAdapter<String>(
+        val adapter = ArrayAdapter(
             mActivity,
             android.R.layout.simple_spinner_item,
-            titles
+            videoQualities.map { videoQualityTitle(mActivity, it) },
         )
 
-        vQAdapter.setDropDownViewResource(
+        adapter.setDropDownViewResource(
             android.R.layout.simple_spinner_dropdown_item
         )
 
-        videoQualitySpinner.adapter = vQAdapter
+        videoQualitySpinner.adapter = adapter
 
         if (camConfig.videoQuality != Quality.HIGHEST) {
-            videoQualitySpinner.setSelection(titles.indexOf(getTitleFor(camConfig.videoQuality)))
+            videoQualitySpinner.setSelection(videoQualities.indexOf(camConfig.videoQuality))
         }
     }
 }
